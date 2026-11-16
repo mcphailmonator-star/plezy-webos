@@ -19,14 +19,14 @@ Native LG webOS TV port of [Plezy](https://github.com/edde746/plezy) — a moder
 
 ## Download & Which Package to Use
 
-All releases ship two native 32-bit ARM (`armv7l`) `.ipk` packages on the [Releases page](https://github.com/mcphailmonator-star/plezy/releases/latest). Both share app ID `com.edde746.plezy` — **install only one package (and enable only one Homebrew repository) on a TV at a time.**
+All releases ship two native 32-bit ARM (`armv7l`) `.ipk` packages on the [Releases page](https://github.com/mcphailmonator-star/plezy-webos/releases/latest). Both share app ID `com.edde746.plezy` — **install only one package (and enable only one Homebrew repository) on a TV at a time.**
 
 Choosing the right `.ipk` depends on your TV's **hardware release year** rather than the displayed webOS version alone. When 2022–2024 TVs receive webOS 25 or 26 via LG's *webOS Re:New* program, the UI updates while the underlying `glibc 2.35` and `wl_webos_shell` v1 runtime remain on the pre-2025 baseline.
 
 | TV Hardware / Firmware | Package | Homebrew Channel / Glasshouse `.repo.json` URL | Notes |
 | --- | --- | --- | --- |
-| **Factory 2025 / 2026 TVs** (`webOS 25` / `webOS 26`) | [`*_arm_webos25-26.ipk`](https://github.com/mcphailmonator-star/plezy/releases/latest) | `https://github.com/mcphailmonator-star/plezy/releases/latest/download/plezy-webos25-26.repo.json` | Native `glibc 2.38+`, `wl_webos_shell` v2, and `NDL_MediaInitWithWindowId` |
-| **Pre-2025 TVs** (`webOS 6.x` through `webOS 24`, or 2022–2024 *Re:New* TVs on `webOS 25` / `26`) | [`*_arm_webos6-24.ipk`](https://github.com/mcphailmonator-star/plezy/releases/latest) | `https://github.com/mcphailmonator-star/plezy/releases/latest/download/plezy-webos6-24.repo.json` | Targets `webOS 6.x` (`glibc 2.28+`) through `webOS 24` and *Re:New* TVs: bundles `libwebos_compat32.so` (`glibc 2.28–2.38` + Wayland v1 shims), NDK `libstdc++.so.6` (`6.0.32`), and `libsqlite3_dart.so` (`3.50.2`) |
+| **Factory 2025 / 2026 TVs** (`webOS 25` / `webOS 26`) | [`*_arm_webos25-26.ipk`](https://github.com/mcphailmonator-star/plezy-webos/releases/latest) | `https://github.com/mcphailmonator-star/plezy-webos/releases/latest/download/plezy-webos25-26.repo.json` | Native `glibc 2.38+`, `wl_webos_shell` v2, and `NDL_MediaInitWithWindowId` |
+| **Pre-2025 TVs** (`webOS 6.x` through `webOS 24`, or 2022–2024 *Re:New* TVs on `webOS 25` / `26`) | [`*_arm_webos6-24.ipk`](https://github.com/mcphailmonator-star/plezy-webos/releases/latest) | `https://github.com/mcphailmonator-star/plezy-webos/releases/latest/download/plezy-webos6-24.repo.json` | Targets `webOS 6.x` (`glibc 2.28+`) through `webOS 24` and *Re:New* TVs: bundles `libwebos_compat32.so` (`glibc 2.28–2.38` + Wayland v1 shims), NDK `libstdc++.so.6` (`6.0.32`), and `libsqlite3_dart.so` (`3.50.2`) |
 
 > [!TIP]
 > If the `webos25-26` build closes immediately after launch, uninstall it and install the `webos6-24` build instead. Runtime compatibility is statically verified against webOS `6.4.0`–`11.2.0` firmware library databases; physical TV playback (`NDL_media`) confirmation on webOS 6.x hardware is welcomed via issues/logs (`/media/developer/temp/plezy_appdata/log`).
@@ -44,7 +44,7 @@ Best if you have [webOS Homebrew Channel](https://github.com/webosbrew/webos-hom
 
 ### Option 2: webOS Dev Manager (No Root Required)
 
-1. Download the matching `.ipk` file from the [Latest Release](https://github.com/mcphailmonator-star/plezy/releases/latest).
+1. Download the matching `.ipk` file from the [Latest Release](https://github.com/mcphailmonator-star/plezy-webos/releases/latest).
 2. On your LG TV, install **Developer Mode** from the LG Content Store, sign in with a free LG Developer account, and enable **Dev Mode Status** and **Key Server**.
 3. On your computer, open [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop/releases) and add/connect your TV using its IP address and Developer Mode passphrase.
 4. Click **Install** (`+`) and select your downloaded `.ipk` file, then launch **Plezy** from your TV home screen.
@@ -220,7 +220,7 @@ All LG webOS plugins (`webos_plugins/`) and Dart 3.10-compatible vendored packag
 ### Quick Build (Ubuntu / Linux x86_64)
 
 ```bash
-git clone https://github.com/mcphailmonator-star/plezy.git
+git clone https://github.com/mcphailmonator-star/plezy-webos.git plezy
 cd plezy
 
 # Install LG Starfish NDK 11.2.0, flutter-webos (Flutter 3.38.10 / Dart 3.10.9), Node.js 22, and ares 3.2.6

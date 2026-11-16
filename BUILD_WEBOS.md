@@ -52,7 +52,7 @@ Expected layout under `$WORK_DIR` (defaults to `~/plezy-webos-workspace`):
 ~/plezy-webos-workspace/
 ├── flutter-webos/                  # git clone https://github.com/lg-flutter-webos/flutter-webos.git (95039813)
 ├── sqlite-amalgamation-3500200.zip # downloaded by setup-toolchain.sh or build_32bit_ipk.sh
-└── plezy/                          # git clone https://github.com/mcphailmonator-star/plezy.git
+└── plezy/                          # git clone https://github.com/mcphailmonator-star/plezy-webos.git plezy
     ├── webos_plugins/              # In-repo LG webOS Flutter plugins (with video_player NDL/Wayland patches applied)
     ├── vendor/                     # In-repo Dart 3.10-adjusted dependencies (slang, background_downloader, etc.)
     └── scripts/webos/
