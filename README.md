@@ -26,10 +26,10 @@ Choosing the right `.ipk` depends on your TV's **hardware release year** rather 
 | TV Hardware / Firmware | Package | Homebrew Channel / Glasshouse `.repo.json` URL | Notes |
 | --- | --- | --- | --- |
 | **Factory 2025 / 2026 TVs** (`webOS 25` / `webOS 26`) | [`*_arm_webos25-26.ipk`](https://github.com/mcphailmonator-star/plezy/releases/latest) | `https://github.com/mcphailmonator-star/plezy/releases/latest/download/plezy-webos25-26.repo.json` | Native `glibc 2.38+`, `wl_webos_shell` v2, and `NDL_MediaInitWithWindowId` |
-| **Pre-2025 TVs** (`webOS 23` / `webOS 24`, or 2022–2024 *Re:New* TVs on `webOS 25` / `26`) | [`*_arm_webos6-24.ipk`](https://github.com/mcphailmonator-star/plezy/releases/latest) | `https://github.com/mcphailmonator-star/plezy/releases/latest/download/plezy-webos6-24.repo.json` | Bundles `libwebos_compat32.so` shim & `wl_webos_shell` v1 patch. Needs `glibc 2.35+`; TVs on `glibc 2.31` (webOS 6.0 or un-updated webOS 22) are unlikely to run it |
+| **Pre-2025 TVs** (`webOS 6.x` through `webOS 24`, or 2022–2024 *Re:New* TVs on `webOS 25` / `26`) | [`*_arm_webos6-24.ipk`](https://github.com/mcphailmonator-star/plezy/releases/latest) | `https://github.com/mcphailmonator-star/plezy/releases/latest/download/plezy-webos6-24.repo.json` | Targets `webOS 6.x` (`glibc 2.28+`) through `webOS 24` and *Re:New* TVs: bundles `libwebos_compat32.so` (`glibc 2.28–2.38` + Wayland v1 shims), NDK `libstdc++.so.6` (`6.0.32`), and `libsqlite3_dart.so` (`3.50.2`) |
 
 > [!TIP]
-> If the `webos25-26` build closes immediately after launch, uninstall it and install the `webos6-24` build instead.
+> If the `webos25-26` build closes immediately after launch, uninstall it and install the `webos6-24` build instead. Runtime compatibility is statically verified against webOS `6.4.0`–`11.2.0` firmware library databases; physical TV playback (`NDL_media`) confirmation on webOS 6.x hardware is welcomed via issues/logs (`/media/developer/temp/plezy_appdata/log`).
 
 ## How to Install
 

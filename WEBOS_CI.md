@@ -53,6 +53,7 @@ Pinned versions are at the top of the script:
 | `flutter-webos` | `950398131830e9bd5dc91e588c3db8f5c42322be` | git clone |
 | Node.js | 22.22.1 | nodejs.org, SHA-256 checked |
 | `@webos-tools/cli` (`ares`) | 3.2.6 | npm |
+| SQLite amalgamation | 3.50.2 (`3500200`) | sqlite.org, SHA-256 checked |
 
 What it does:
 
@@ -64,6 +65,7 @@ What it does:
 3. Clones `flutter-webos` into `$WORK_DIR/flutter-webos` and checks out the pinned commit.
 4. Installs Node.js into `$WORK_DIR/node` unless that version is already there, then installs
    `ares` into it.
+5. Downloads and SHA-256 verifies `sqlite-amalgamation-3500200.zip` into `$WORK_DIR`.
 
 `WORK_DIR` defaults to `~/plezy-webos-workspace`, matching `env.sh`. `ares` 3.2.6 requires Node.js
 20 or later; LG's guide lists Node 14-16, which no longer works.
@@ -85,8 +87,9 @@ into `$WORK_DIR/flutter-webos`.
 ## Cache
 
 `actions/cache` stores `/home/runner/starfish-sdk-x86_64` and `/home/runner/plezy-webos-workspace`
-(the NDK, `flutter-webos` with its Flutter and Dart SDKs, Node.js and `ares`). About 1.2 GB
-compressed; the repository limit is 10 GB, and entries unused for 7 days are deleted.
+(the NDK, `flutter-webos` with its Flutter and Dart SDKs, Node.js, `ares`, and the SQLite
+amalgamation archive). About 1.2 GB compressed; the repository limit is 10 GB, and entries unused
+for 7 days are deleted.
 
 - Key: `webos-toolchain-<os>-<hash of setup-toolchain.sh>`. Changing any pinned version replaces
   the cache.
@@ -99,7 +102,7 @@ compressed; the repository limit is 10 GB, and entries unused for 7 days are del
 
 ## Releases and the Homebrew Channel
 
-To publish, push a tag matching `v*-webos*` on the branch, for example `v2.26.0-webos.1`:
+To publish, push a tag matching `v*-webos*` on the branch, for example `v2.26.0-webos.2`:
 
 ```bash
 git tag v2.26.0-webos.2
@@ -110,8 +113,8 @@ git push <remote> v2.26.0-webos.2
 
 | Asset | Contents |
 | --- | --- |
-| `com.edde746.plezy_<ver>_arm_webos25-26.ipk` | Unpatched package (webOS 26) |
-| `com.edde746.plezy_<ver>_arm_webos6-24.ipk` | Patched package (webOS 24, likely webOS 25) |
+| `com.edde746.plezy_<ver>_arm_webos25-26.ipk` | Unpatched package (factory webOS 25 / 26) |
+| `com.edde746.plezy_<ver>_arm_webos6-24.ipk` | Patched package (webOS 6.x–24 and Re:New 25 / 26) |
 | `plezy-<variant>.manifest.json` | Homebrew Channel manifest per package |
 | `plezy-<variant>.repo.json` | Homebrew Channel repository per package |
 

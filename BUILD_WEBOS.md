@@ -14,15 +14,15 @@ All webOS plugins (`./webos_plugins/`) and patched third-party dependencies (`./
 
 | webOS Version | Marketing Year | Example TV Models | Required Package | Why? |
 | :--- | :--- | :--- | :--- | :--- |
-| **webOS 25 / webOS 26+** | 2025 / 2026 (or updated 2023/2024 TVs) | LG OLED C5, G5, QNED81 (updated to webOS 25+) | **`com.edde746.plezy_<ver>_arm_webos25-26.ipk`** | Ships natively with `glibc >= 2.38`, `GLIBCXX_3.4.32`, `wl_webos_shell` v2, and `NDL_MediaInitWithWindowId`. |
-| **webOS 24** | 2024 | LG OLED G4, C4, B4, QNED85T | **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`** | Uses `glibc < 2.38`, `wl_webos_shell` v1, and legacy `NDL_MediaInit`. Requires `libwebos_compat32.so` shims. |
-| **webOS 22 / webOS 23** | 2022 / 2023 | LG QNED816RE, OLED C2, C3, G2, G3 | **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`** | Uses `glibc < 2.38`, `/lib/ld-linux.so.3`, `wl_webos_shell` v1, and legacy `NDL_MediaInit`. |
-| **webOS 6.x** | 2021 | LG OLED C1, G1 | **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`** | Requires ELF ABI kernel tag `3.2.0`, `glibc 2.4` symbol forwarding, and Wayland v1 clamping. |
+| **Factory webOS 25 / 26+** | 2025 / 2026 factory hardware | LG OLED C5, G5 | **`com.edde746.plezy_<ver>_arm_webos25-26.ipk`** | Ships natively with `glibc >= 2.38`, `GLIBCXX_3.4.32`, `wl_webos_shell` v2, and `NDL_MediaInitWithWindowId`. |
+| **webOS 24 & Re:New 25/26** | 2022–2024 models (including *Re:New* updates) | LG OLED G4, C4, B4, QNED85T, C2/C3 | **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`** | Uses `glibc 2.35`, `wl_webos_shell` v1, and legacy `NDL_MediaInit`. Requires `libwebos_compat32.so` and `libstdc++.so.6` (`6.0.32`). |
+| **webOS 22 / 23** | 2022 / 2023 | LG QNED816RE, OLED C2, C3, G2, G3 | **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`** | Uses `glibc 2.31`, `libstdc++.so.6` (`6.0.28`), `/lib/ld-linux.so.3`, `wl_webos_shell` v1 (`wl_proxy_marshal_flags` unavailable), and legacy `NDL_MediaInit`. |
+| **webOS 6.x** | 2021 | LG OLED C1, G1, `75QNED90UPA` (`03.53.45`) | **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`** | Uses `glibc 2.28`, `libstdc++.so.6` (`6.0.25`), and older system SQLite (`libsqlite3.so.0`). Uses `libwebos_compat32.so` shims, ELF `GLIBC_2.4` symbol remapping, ABI kernel tag `3.2.0`, Wayland v1/flags shims, NDK `libstdc++.so.6`, and bundled `libsqlite3_dart.so` (`3.50.2`). |
 
 **Rule of Thumb:**
-- If your TV runs **webOS 25 or webOS 26**, install **`com.edde746.plezy_<ver>_arm_webos25-26.ipk`**.
-- If your TV runs **webOS 24 or older** (including 2024 models like the **LG G4 / C4** on webOS 24), or if the `webos25-26` package fails to launch, install **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`**.
-- Both packages are packed using **POSIX `ustar` format** (`--format=ustar`) and work with **webOS Dev Manager**, **ares-install**, and **Glasshouse**.
+- If your TV shipped with **webOS 25 or webOS 26** from the factory (2025+ models), install **`com.edde746.plezy_<ver>_arm_webos25-26.ipk`**.
+- If your TV is a **2021–2024 model** (**webOS 6.x through webOS 24**, including 2022–2024 TVs upgraded to webOS 25/26 via *Re:New*), or if the `webos25-26` package fails to launch, install **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`**.
+- Both packages are packed using **POSIX `ustar` format** (`--format=ustar`) and work with **webOS Dev Manager**, **ares-install**, **Homebrew Channel**, and **Glasshouse**.
 
 ---
 
@@ -30,7 +30,6 @@ All webOS plugins (`./webos_plugins/`) and patched third-party dependencies (`./
 
 The release packages were built with the following exact toolchain versions:
 
-- **Host OS:** Ubuntu 26.04.1 LTS on WSL2 (`6.18.58.1-microsoft-standard-WSL2`, `x86_64`)
 - **`flutter-webos` CLI:** [`lg-flutter-webos/flutter-webos`](https://github.com/lg-flutter-webos/flutter-webos) at commit `950398131830e9bd5dc91e588c3db8f5c42322be`
   - **Flutter Framework:** `3.38.10` — revision `c6f67dede3` (`2026-02-10`)
   - **Flutter Engine:** revision `cafcda5721` (hash `3c25ef829c74f0f39fbb8df093d9a6b9f941ea6b`)
@@ -41,22 +40,25 @@ The release packages were built with the following exact toolchain versions:
   - **Target Sysroot:** `ca9v1-webosmllib32-linux-gnueabi`
   - **Environment Script:** `/usr/local/starfish-sdk-x86_64/environment-setup-ca9v1-webosmllib32-linux-gnueabi`
   - **Bundled Clang / CMake:** `clang 18.1.6`, `cmake 3.28.3`, `pkg-config 0.29.2`
-- **webOS CLI (`ares`) & Node.js:** `@webos-tools/cli` (`ares`) `3.2.4`, `node` `v22.22.1`
-- **Host Utilities:** `patchelf`, `python3`, `binutils` (`ar`, `readelf`), `tar`
+- **SQLite Amalgamation (`libsqlite3_dart.so`):** `3.50.2` (`sqlite-amalgamation-3500200.zip`, SHA-256 verified and downloaded automatically by `setup-toolchain.sh` / `build_32bit_ipk.sh` into `$WORK_DIR`)
+- **webOS CLI (`ares`) & Node.js:** `@webos-tools/cli` (`ares`) `3.2.6`, `node` `v22.22.1`
+- **Host Utilities:** `patchelf`, `python3`, `binutils` (`ar`, `readelf`), `tar`, `unzip`
 
 ### Workspace Layout & `scripts/webos/env.sh`
 
- expected layout under `$ WORK_DIR` (defaults to `~/plezy-webos-workspace`):
+Expected layout under `$WORK_DIR` (defaults to `~/plezy-webos-workspace`):
 
 ```text
 ~/plezy-webos-workspace/
-├── flutter-webos/          # git clone https://github.com/lg-flutter-webos/flutter-webos.git (95039813)
-└── plezy/                  # git clone https://github.com/GLNick/plezy-webos.git
-    ├── webos_plugins/      # In-repo LG webOS Flutter plugins (with video_player NDL/Wayland patches applied)
-    ├── vendor/             # In-repo Dart 3.10-adjusted dependencies (slang, background_downloader, etc.)
+├── flutter-webos/                  # git clone https://github.com/lg-flutter-webos/flutter-webos.git (95039813)
+├── sqlite-amalgamation-3500200.zip # downloaded by setup-toolchain.sh or build_32bit_ipk.sh
+└── plezy/                          # git clone https://github.com/mcphailmonator-star/plezy.git
+    ├── webos_plugins/              # In-repo LG webOS Flutter plugins (with video_player NDL/Wayland patches applied)
+    ├── vendor/                     # In-repo Dart 3.10-adjusted dependencies (slang, background_downloader, etc.)
     └── scripts/webos/
         ├── env.sh
         ├── build_32bit_ipk.sh
+        ├── ci/
         └── vendor_diffs.patch
 ```
 

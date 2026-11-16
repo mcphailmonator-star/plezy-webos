@@ -13,6 +13,8 @@ NODE_VERSION=22.22.1
 NODE_SHA256=9a6bc82f9b491279147219f6a18add1e18424dce90d41d2a5fcd69d4924ba3aa
 # ares 3.2.6 requires Node.js 20 or newer, despite LG's guide listing Node 14-16.
 ARES_VERSION=3.2.6
+SQLITE_AMALG_URL=https://sqlite.org/2025/sqlite-amalgamation-3500200.zip
+SQLITE_AMALG_SHA256=387991de2834b5da2894119ff4173a9ea0779ea55ebcf53d9a40b24d1dc2484e
 
 mkdir -p "$WORK_DIR"
 
@@ -47,3 +49,12 @@ if [ "$("$NODE_DIR/bin/node" --version 2>/dev/null)" != "v$NODE_VERSION" ]; then
   rm -f "$archive"
 fi
 PATH="$NODE_DIR/bin:$PATH" npm install -g --silent "@webos-tools/cli@$ARES_VERSION"
+
+SQLITE_AMALG_ZIP="$WORK_DIR/sqlite-amalgamation-3500200.zip"
+if [ ! -f "$SQLITE_AMALG_ZIP" ] || ! echo "$SQLITE_AMALG_SHA256  $SQLITE_AMALG_ZIP" | sha256sum -c --status -; then
+  tmp_sqlite="$(mktemp)"
+  curl -fsSL -o "$tmp_sqlite" "$SQLITE_AMALG_URL"
+  echo "$SQLITE_AMALG_SHA256  $tmp_sqlite" | sha256sum -c -
+  mv -f "$tmp_sqlite" "$SQLITE_AMALG_ZIP"
+fi
+
