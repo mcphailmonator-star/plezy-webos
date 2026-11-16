@@ -374,6 +374,7 @@ c_code = """#include <stdarg.h>
 typedef __UINT32_TYPE__ uint32_t;
 typedef __INT32_TYPE__  int32_t;
 typedef __UINT16_TYPE__ uint16_t;
+typedef __UINTPTR_TYPE__ uintptr_t;
 
 #define EXPORT __attribute__((used, visibility("default")))
 #define RTLD_NEXT ((void *)-1L)
@@ -383,6 +384,26 @@ typedef __UINT16_TYPE__ uint16_t;
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 #define EINVAL 22
+#define ENOENT 2
+
+#define COMPAT_O_RDONLY  0
+#define COMPAT_O_WRONLY  1
+#define COMPAT_O_CREAT   64
+#define COMPAT_O_TRUNC   512
+#define COMPAT_O_APPEND  1024
+#define COMPAT_O_CLOEXEC 524288
+
+#define COMPAT_SIGILL    4
+#define COMPAT_SIGABRT   6
+#define COMPAT_SIGBUS    7
+#define COMPAT_SIGFPE    8
+#define COMPAT_SIGSEGV   11
+
+#define COMPAT_SA_SIGINFO   4
+#define COMPAT_SA_RESETHAND 0x80000000U
+
+#define PMLOG_LEVEL_ERROR 3
+#define PMLOG_LEVEL_INFO  6
 
 typedef struct _IO_FILE FILE;
 typedef void *locale_t;
@@ -390,6 +411,13 @@ typedef void *locale_t;
 struct compat_timespec {
     long tv_sec;
     long tv_nsec;
+};
+
+struct compat_sigaction {
+    void (*sa_sigaction)(int, void *, void *);
+    uint32_t sa_mask[32];
+    int sa_flags;
+    void (*sa_restorer)(void);
 };
 
 extern void *dlsym(void *handle, const char *symbol);
@@ -402,7 +430,10 @@ extern int chmod(const char *pathname, unsigned int mode);
 extern int access(const char *pathname, int mode);
 extern int open(const char *pathname, int flags, ...);
 extern int read(int fd, void *buf, unsigned int count);
+extern int write(int fd, const void *buf, unsigned int count);
 extern int close(int fd);
+extern int readlink(const char *pathname, char *buf, unsigned int bufsiz);
+extern int unlink(const char *pathname);
 
 extern int clock_gettime(int clk_id, struct compat_timespec *tp);
 extern int pthread_cond_timedwait(void *cond, void *mutex, const struct compat_timespec *abstime);
@@ -462,6 +493,35 @@ static void copy_str(char *dst, const char *src, unsigned int max_len) {
     dst[i] = '\\0';
 }
 
+static unsigned int c_strlen(const char *s) {
+    unsigned int n = 0;
+    if (!s) return 0;
+    while (s[n]) ++n;
+    return n;
+}
+
+static void c_memzero(void *dst, unsigned int len) {
+    unsigned char *p = (unsigned char *)dst;
+    for (unsigned int i = 0; i < len; ++i) p[i] = 0;
+}
+
+static void c_memcpy(void *dst, const void *src, unsigned int len) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    for (unsigned int i = 0; i < len; ++i) d[i] = s[i];
+}
+
+static const char *c_strstr(const char *hay, const char *needle) {
+    if (!hay || !needle) return 0;
+    if (!needle[0]) return hay;
+    for (unsigned int i = 0; hay[i]; ++i) {
+        unsigned int j = 0;
+        while (needle[j] && hay[i + j] == needle[j]) ++j;
+        if (!needle[j]) return hay + i;
+    }
+    return 0;
+}
+
 static void *resolve_libc_sym(const char *name) {
     static void *libc_handle = 0;
     void *fn = dlsym(RTLD_NEXT, name);
@@ -489,6 +549,574 @@ static void *resolve_pthread_sym(const char *name) {
         if (fn) return fn;
     }
     return resolve_libc_sym(name);
+}
+
+/* ============================================================================
+ * Async-Signal-Safe State, Boot Tracer, Crash Handlers & Fatal Function Hooks
+ * ============================================================================ */
+typedef int (*fn_open_t)(const char *, int, ...);
+typedef int (*fn_read_t)(int, void *, unsigned int);
+typedef int (*fn_write_t)(int, const void *, unsigned int);
+typedef int (*fn_close_t)(int);
+typedef int (*fn_readlink_t)(const char *, char *, unsigned int);
+typedef int (*fn_getpid_t)(void);
+typedef unsigned int (*fn_getuid_t)(void);
+typedef int (*fn_sigaction_t)(int, const struct compat_sigaction *, struct compat_sigaction *);
+typedef void (*fn_abort_t)(void);
+typedef void (*fn_assert_fail_t)(const char *, const char *, unsigned int, const char *);
+typedef void (*fn_exit_t)(int);
+typedef FILE *(*fn_fopen_t)(const char *, const char *);
+typedef int *(*fn_errno_loc_t)(void);
+typedef int (*fn_pmlog_getctx_t)(const char *, const void **);
+typedef int (*fn_pmlog_str_t)(const void *, int, const char *, const char *, const char *);
+typedef int (*fn_setenv_t)(const char *, const char *, int);
+typedef char *(*fn_getenv_t)(const char *);
+
+static fn_open_t        g_real_open        = 0;
+static fn_read_t        g_real_read        = 0;
+static fn_write_t       g_real_write       = 0;
+static fn_close_t       g_real_close       = 0;
+static fn_readlink_t    g_real_readlink    = 0;
+static fn_getpid_t      g_real_getpid      = 0;
+static fn_getuid_t      g_real_getuid      = 0;
+static fn_sigaction_t   g_real_sigaction   = 0;
+static fn_abort_t       g_real_abort       = 0;
+static fn_assert_fail_t g_real_assert_fail = 0;
+static fn_exit_t        g_real_exit        = 0;
+static fn_fopen_t       g_real_fopen       = 0;
+static fn_fopen_t       g_real_fopen64     = 0;
+static fn_errno_loc_t   g_real_errno_loc   = 0;
+static fn_setenv_t      g_real_setenv      = 0;
+static fn_getenv_t      g_real_getenv      = 0;
+static fn_pmlog_str_t   g_pmlog_str        = 0;
+static const void      *g_pmlog_ctx        = 0;
+
+static char g_exe_dir[512]       = "";
+static char g_appdata_dir[512]   = "/tmp/plezy_appdata";
+static char g_cache_dir[512]     = "/tmp/plezy_appdata/.cache";
+static char g_download_dir[512]  = "/tmp/plezy_appdata/.download";
+static char g_log_dir[512]       = "/tmp/plezy_appdata/log";
+static char g_boot_log_path[512] = "/tmp/plezy_boot.log";
+static int  g_main_pid           = -1;
+static volatile int g_crash_lock = 0;
+
+EXPORT void abort(void);
+EXPORT void exit(int status);
+EXPORT void __assert_fail(const char *assertion, const char *file, unsigned int line, const char *function);
+EXPORT FILE *fopen(const char *pathname, const char *mode);
+EXPORT FILE *fopen64(const char *pathname, const char *mode);
+EXPORT int setenv(const char *name, const char *value, int overwrite);
+EXPORT char *getenv(const char *name);
+static void ensure_compat_init(void);
+
+static void cache_libc_ptrs(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    void *p;
+    g_real_open     = (fn_open_t)resolve_libc_sym("open");
+    g_real_read     = (fn_read_t)resolve_libc_sym("read");
+    g_real_write    = (fn_write_t)resolve_libc_sym("write");
+    g_real_close    = (fn_close_t)resolve_libc_sym("close");
+    g_real_readlink = (fn_readlink_t)resolve_libc_sym("readlink");
+    g_real_getpid   = (fn_getpid_t)resolve_libc_sym("getpid");
+    g_real_getuid   = (fn_getuid_t)resolve_libc_sym("getuid");
+    g_real_sigaction = (fn_sigaction_t)resolve_libc_sym("sigaction");
+    g_real_errno_loc = (fn_errno_loc_t)resolve_libc_sym("__errno_location");
+
+    p = resolve_libc_sym("abort");
+    if (p && p != (void *)abort) g_real_abort = (fn_abort_t)p;
+    p = resolve_libc_sym("__assert_fail");
+    if (p && p != (void *)__assert_fail) g_real_assert_fail = (fn_assert_fail_t)p;
+    p = resolve_libc_sym("exit");
+    if (p && p != (void *)exit) g_real_exit = (fn_exit_t)p;
+    p = resolve_libc_sym("fopen");
+    if (p && p != (void *)fopen) g_real_fopen = (fn_fopen_t)p;
+    p = resolve_libc_sym("fopen64");
+    if (p && p != (void *)fopen64) g_real_fopen64 = (fn_fopen_t)p;
+    if (!g_real_fopen64) g_real_fopen64 = g_real_fopen;
+    p = resolve_libc_sym("setenv");
+    if (p && p != (void *)setenv) g_real_setenv = (fn_setenv_t)p;
+    p = resolve_libc_sym("getenv");
+    if (p && p != (void *)getenv) g_real_getenv = (fn_getenv_t)p;
+}
+
+static void init_pmlog(void) {
+    static int tried = 0;
+    if (tried) return;
+    tried = 1;
+    void *h = dlopen("libPmLogLib.so.3", RTLD_LAZY);
+    if (!h) h = dlopen("/usr/lib/libPmLogLib.so.3", RTLD_LAZY);
+    if (!h) return;
+    fn_pmlog_getctx_t getctx = (fn_pmlog_getctx_t)dlsym(h, "PmLogGetContext");
+    g_pmlog_str = (fn_pmlog_str_t)dlsym(h, "PmLogString_");
+    if (getctx) {
+        if (getctx("plezy.compat32", &g_pmlog_ctx) != 0) {
+            g_pmlog_ctx = 0;
+        }
+    }
+}
+
+struct log_buf {
+    char data[768];
+    unsigned int len;
+};
+
+static void lbuf_init(struct log_buf *b) {
+    b->len = 0;
+    b->data[0] = '\\0';
+}
+
+static void lbuf_str(struct log_buf *b, const char *s) {
+    if (!s) s = "(null)";
+    for (unsigned int i = 0; s[i] && b->len + 2 < sizeof(b->data); ++i) {
+        b->data[b->len++] = s[i];
+    }
+    b->data[b->len] = '\\0';
+}
+
+static void lbuf_str_trunc(struct log_buf *b, const char *s, unsigned int maxc) {
+    if (!s) s = "(null)";
+    for (unsigned int i = 0; s[i] && i < maxc && b->len + 2 < sizeof(b->data); ++i) {
+        char ch = s[i];
+        if (ch == '\\n' || ch == '\\r') ch = ' ';
+        b->data[b->len++] = ch;
+    }
+    b->data[b->len] = '\\0';
+}
+
+static void lbuf_hex32(struct log_buf *b, uint32_t v) {
+    const char *hex = "0123456789abcdef";
+    lbuf_str(b, "0x");
+    for (int shift = 28; shift >= 0 && b->len + 2 < sizeof(b->data); shift -= 4) {
+        b->data[b->len++] = hex[(v >> shift) & 0xfU];
+    }
+    b->data[b->len] = '\\0';
+}
+
+static void lbuf_u32(struct log_buf *b, uint32_t v) {
+    static const uint32_t pow10[10] = {
+        1000000000U, 100000000U, 10000000U, 1000000U, 100000U,
+        10000U, 1000U, 100U, 10U, 1U
+    };
+    int started = 0;
+    for (int i = 0; i < 10; ++i) {
+        uint32_t p = pow10[i];
+        uint32_t d = 0;
+        while (v >= p) {
+            v -= p;
+            ++d;
+        }
+        if (d > 0 || started || i == 9) {
+            started = 1;
+            if (b->len + 2 < sizeof(b->data)) {
+                b->data[b->len++] = (char)('0' + d);
+            }
+        }
+    }
+    b->data[b->len] = '\\0';
+}
+
+static void lbuf_i32(struct log_buf *b, int32_t v) {
+    if (v < 0) {
+        lbuf_str(b, "-");
+        lbuf_u32(b, (uint32_t)(-(v + 1)) + 1U);
+    } else {
+        lbuf_u32(b, (uint32_t)v);
+    }
+}
+
+static void write_file_line_raw(const char *path, const char *line, unsigned int len) {
+    fn_open_t fn_open = g_real_open ? g_real_open : open;
+    fn_write_t fn_write = g_real_write ? g_real_write : write;
+    fn_close_t fn_close = g_real_close ? g_real_close : close;
+    if (!path || !path[0] || !line || len == 0) return;
+    int fd = fn_open(path, COMPAT_O_CREAT | COMPAT_O_WRONLY | COMPAT_O_APPEND | COMPAT_O_CLOEXEC, 0666);
+    if (fd >= 0) {
+        (void)fn_write(fd, line, len);
+        (void)fn_write(fd, "\\n", 1);
+        fn_close(fd);
+    }
+}
+
+static void log_raw_line(int pmlog_level, const struct log_buf *b, int allow_pmlog) {
+    write_file_line_raw(g_boot_log_path, b->data, b->len);
+    if (strcmp(g_boot_log_path, "/tmp/plezy_boot.log") != 0) {
+        write_file_line_raw("/tmp/plezy_boot.log", b->data, b->len);
+    }
+    if (allow_pmlog && g_pmlog_str) {
+        g_pmlog_str(g_pmlog_ctx, pmlog_level, "COMPAT32", "{}", b->data);
+    }
+}
+
+static void log_text(int pmlog_level, const char *msg) {
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "[compat32 pid=");
+    lbuf_i32(&b, g_real_getpid ? g_real_getpid() : 0);
+    lbuf_str(&b, "] ");
+    lbuf_str_trunc(&b, msg, 680);
+    log_raw_line(pmlog_level, &b, 1);
+}
+
+static int parse_hex_range_u32(const char *s, uint32_t *out_val, const char **next_p) {
+    uint32_t v = 0;
+    int digits = 0;
+    while (*s) {
+        char c = *s;
+        uint32_t d;
+        if (c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (uint32_t)(c - 'A' + 10);
+        else break;
+        v = (v << 4) | d;
+        ++digits;
+        ++s;
+    }
+    if (digits == 0) return 0;
+    *out_val = v;
+    *next_p = s;
+    return 1;
+}
+
+static void log_addr_in_maps_raw(const char *tag, uint32_t addr, int allow_pmlog) {
+    fn_open_t fn_open = g_real_open ? g_real_open : open;
+    fn_read_t fn_read = g_real_read ? g_real_read : read;
+    fn_close_t fn_close = g_real_close ? g_real_close : close;
+    if (!addr) return;
+    int fd = fn_open("/proc/self/maps", COMPAT_O_RDONLY | COMPAT_O_CLOEXEC);
+    if (fd < 0) return;
+
+    char chunk[512];
+    char line[384];
+    unsigned int line_len = 0;
+    int matched = 0;
+    for (;;) {
+        int n = fn_read(fd, chunk, sizeof(chunk));
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i) {
+            char ch = chunk[i];
+            if (ch == '\\n') {
+                line[line_len] = '\\0';
+                uint32_t start_va = 0, end_va = 0;
+                const char *p1 = 0, *p2 = 0;
+                if (parse_hex_range_u32(line, &start_va, &p1) && p1 && *p1 == '-' &&
+                    parse_hex_range_u32(p1 + 1, &end_va, &p2)) {
+                    if (addr >= start_va && addr < end_va) {
+                        struct log_buf b;
+                        lbuf_init(&b);
+                        lbuf_str(&b, "  ");
+                        lbuf_str(&b, tag);
+                        lbuf_str(&b, "=");
+                        lbuf_hex32(&b, addr);
+                        lbuf_str(&b, " (+");
+                        lbuf_hex32(&b, addr - start_va);
+                        lbuf_str(&b, ") in ");
+                        lbuf_str_trunc(&b, line, 240);
+                        log_raw_line(PMLOG_LEVEL_ERROR, &b, allow_pmlog);
+                        matched = 1;
+                    }
+                }
+                line_len = 0;
+            } else if (line_len + 1 < sizeof(line)) {
+                line[line_len++] = ch;
+            }
+        }
+        if (matched) break;
+    }
+    fn_close(fd);
+}
+
+static void compat_crash_handler(int signo, void *siginfo_ptr, void *ucontext_ptr) {
+    if (__atomic_test_and_set(&g_crash_lock, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    uint32_t si_code = 0, si_addr = 0;
+    uint32_t r0 = 0, sp_reg = 0, lr_reg = 0, pc_reg = 0, cpsr = 0, fault = 0;
+    if (siginfo_ptr) {
+        const char *si = (const char *)siginfo_ptr;
+        si_code = *(const uint32_t *)(si + 8);
+        si_addr = *(const uint32_t *)(si + 12);
+    }
+    if (ucontext_ptr) {
+        const char *uc = (const char *)ucontext_ptr;
+        r0     = *(const uint32_t *)(uc + 32);
+        sp_reg = *(const uint32_t *)(uc + 84);
+        lr_reg = *(const uint32_t *)(uc + 88);
+        pc_reg = *(const uint32_t *)(uc + 92);
+        cpsr   = *(const uint32_t *)(uc + 96);
+        fault  = *(const uint32_t *)(uc + 100);
+    }
+
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "FATAL SIGNAL=");
+    lbuf_i32(&b, signo);
+    lbuf_str(&b, " code=");
+    lbuf_hex32(&b, si_code);
+    lbuf_str(&b, " si_addr=");
+    lbuf_hex32(&b, si_addr);
+    lbuf_str(&b, " pc=");
+    lbuf_hex32(&b, pc_reg);
+    lbuf_str(&b, " lr=");
+    lbuf_hex32(&b, lr_reg);
+    lbuf_str(&b, " sp=");
+    lbuf_hex32(&b, sp_reg);
+    lbuf_str(&b, " r0=");
+    lbuf_hex32(&b, r0);
+    lbuf_str(&b, " cpsr=");
+    lbuf_hex32(&b, cpsr);
+    lbuf_str(&b, " fault=");
+    lbuf_hex32(&b, fault);
+    log_raw_line(PMLOG_LEVEL_ERROR, &b, 0);
+
+    log_addr_in_maps_raw("pc", pc_reg, 0);
+    log_addr_in_maps_raw("lr", lr_reg, 0);
+    log_addr_in_maps_raw("si_addr", si_addr, 0);
+}
+
+static void install_crash_handlers(void) {
+    static int installed = 0;
+    if (installed) return;
+    installed = 1;
+    fn_sigaction_t fn_sig = g_real_sigaction ? g_real_sigaction : (fn_sigaction_t)resolve_libc_sym("sigaction");
+    if (!fn_sig) return;
+
+    struct compat_sigaction sa;
+    c_memzero(&sa, sizeof(sa));
+    sa.sa_sigaction = compat_crash_handler;
+    sa.sa_flags = COMPAT_SA_SIGINFO | (int)COMPAT_SA_RESETHAND;
+
+    const int sigs[5] = {COMPAT_SIGABRT, COMPAT_SIGSEGV, COMPAT_SIGBUS, COMPAT_SIGILL, COMPAT_SIGFPE};
+    for (int i = 0; i < 5; ++i) {
+        fn_sig(sigs[i], &sa, 0);
+    }
+}
+
+EXPORT void abort(void) {
+    cache_libc_ptrs();
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "HOOK abort() caller=");
+    lbuf_hex32(&b, caller);
+    log_raw_line(PMLOG_LEVEL_ERROR, &b, 1);
+    log_addr_in_maps_raw("abort_caller", caller, 1);
+
+    if (g_real_abort) g_real_abort();
+    for (;;) { *(volatile int *)0 = 1; }
+}
+
+EXPORT void __assert_fail(const char *assertion, const char *file, unsigned int line, const char *function) {
+    cache_libc_ptrs();
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "HOOK __assert_fail caller=");
+    lbuf_hex32(&b, caller);
+    lbuf_str(&b, " file=");
+    lbuf_str_trunc(&b, file, 140);
+    lbuf_str(&b, ":");
+    lbuf_u32(&b, line);
+    lbuf_str(&b, " fn=");
+    lbuf_str_trunc(&b, function, 120);
+    lbuf_str(&b, " cond=");
+    lbuf_str_trunc(&b, assertion, 120);
+    log_raw_line(PMLOG_LEVEL_ERROR, &b, 1);
+    log_addr_in_maps_raw("assert_caller", caller, 1);
+
+    if (g_real_assert_fail) {
+        g_real_assert_fail(assertion, file, line, function);
+    }
+    abort();
+}
+
+EXPORT void _ZSt9terminatev(void) {
+    cache_libc_ptrs();
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "HOOK std::terminate() caller=");
+    lbuf_hex32(&b, caller);
+    log_raw_line(PMLOG_LEVEL_ERROR, &b, 1);
+    log_addr_in_maps_raw("terminate_caller", caller, 1);
+
+    typedef void (*term_fn_t)(void);
+    term_fn_t real_term = (term_fn_t)dlsym(RTLD_NEXT, "_ZSt9terminatev");
+    if (!real_term || real_term == _ZSt9terminatev) {
+        void *h = dlopen("libstdc++.so.6", RTLD_LAZY);
+        if (h) {
+            void *p = dlsym(h, "_ZSt9terminatev");
+            if (p && p != (void *)_ZSt9terminatev) real_term = (term_fn_t)p;
+        }
+    }
+    if (real_term && real_term != _ZSt9terminatev) {
+        real_term();
+    }
+    abort();
+}
+
+EXPORT void exit(int status) {
+    cache_libc_ptrs();
+    int cur_pid = g_real_getpid ? g_real_getpid() : -1;
+    if (g_main_pid < 0 || cur_pid == g_main_pid) {
+        uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "HOOK exit(status=");
+        lbuf_i32(&b, status);
+        lbuf_str(&b, ") caller=");
+        lbuf_hex32(&b, caller);
+        log_raw_line(status ? PMLOG_LEVEL_ERROR : PMLOG_LEVEL_INFO, &b, 1);
+        if (status != 0) log_addr_in_maps_raw("exit_caller", caller, 1);
+    }
+    if (g_real_exit) g_real_exit(status);
+    for (;;) { *(volatile int *)0 = 1; }
+}
+
+/* ============================================================================
+ * /var/luna/preferences/localeInfo Schema Validation Guard
+ * ============================================================================ */
+static const char *skip_ws(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\\t' || *p == '\\n' || *p == '\\r')) ++p;
+    return p;
+}
+
+static int json_match_quoted_key(const char *p, const char *end, const char *key, const char **after_quote) {
+    unsigned int klen = c_strlen(key);
+    if (p + 1U + klen + 1U > end || *p != '"') return 0;
+    if (strncmp(p + 1, key, klen) != 0) return 0;
+    if (p[1U + klen] != '"') return 0;
+    *after_quote = p + 1U + klen + 1U;
+    return 1;
+}
+
+static int validate_locale_info_file(void) {
+    static int logged_ok = 0;
+    fn_open_t fn_open = g_real_open ? g_real_open : open;
+    fn_read_t fn_read = g_real_read ? g_real_read : read;
+    fn_close_t fn_close = g_real_close ? g_real_close : close;
+    int fd = fn_open("/var/luna/preferences/localeInfo", COMPAT_O_RDONLY | COMPAT_O_CLOEXEC);
+    if (fd < 0) {
+        log_text(PMLOG_LEVEL_INFO, "localeInfo open failed -> returning NULL for safe fallback");
+        return 0;
+    }
+    char buf[8192];
+    int total = 0;
+    while (total < (int)sizeof(buf) - 1) {
+        int n = fn_read(fd, buf + total, (unsigned int)((int)sizeof(buf) - 1 - total));
+        if (n <= 0) break;
+        total += n;
+    }
+    fn_close(fd);
+    buf[total] = '\\0';
+    const char *end = buf + total;
+    const char *p = skip_ws(buf, end);
+    if (p >= end || *p != '{') {
+        log_text(PMLOG_LEVEL_ERROR, "localeInfo not JSON object -> forcing NULL fallback");
+        return 0;
+    }
+
+    int depth = 0;
+    int stage = 0; /* 0=seek localeInfo@d1, 1=seek locales@d2, 2=seek UI@d3 */
+    int target_depth = 1;
+    int in_str = 0;
+    int esc = 0;
+    while (p < end) {
+        char c = *p;
+        if (in_str) {
+            if (esc) {
+                esc = 0;
+            } else if (c == '\\\\') {
+                esc = 1;
+            } else if (c == '"') {
+                in_str = 0;
+            }
+            ++p;
+            continue;
+        }
+        if (c == '"') {
+            const char *after = 0;
+            if (stage == 0 && depth == 1 && json_match_quoted_key(p, end, "localeInfo", &after)) {
+                const char *col = skip_ws(after, end);
+                if (col < end && *col == ':') {
+                    const char *obj = skip_ws(col + 1, end);
+                    if (obj < end && *obj == '{') {
+                        stage = 1;
+                        target_depth = 2;
+                        depth = 2;
+                        p = obj + 1;
+                        continue;
+                    }
+                }
+            } else if (stage == 1 && depth == 2 && json_match_quoted_key(p, end, "locales", &after)) {
+                const char *col = skip_ws(after, end);
+                if (col < end && *col == ':') {
+                    const char *obj = skip_ws(col + 1, end);
+                    if (obj < end && *obj == '{') {
+                        stage = 2;
+                        target_depth = 3;
+                        depth = 3;
+                        p = obj + 1;
+                        continue;
+                    }
+                }
+            } else if (stage == 2 && depth == 3 && json_match_quoted_key(p, end, "UI", &after)) {
+                const char *col = skip_ws(after, end);
+                if (col < end && *col == ':') {
+                    const char *val = skip_ws(col + 1, end);
+                    if (val + 1 < end && *val == '"' && val[1] != '"') {
+                        if (!logged_ok) {
+                            logged_ok = 1;
+                            log_text(PMLOG_LEVEL_INFO, "localeInfo schema validated OK");
+                        }
+                        return 1;
+                    }
+                    log_text(PMLOG_LEVEL_ERROR, "localeInfo UI invalid/empty -> forcing NULL fallback");
+                    return 0;
+                }
+            }
+            in_str = 1;
+            ++p;
+            continue;
+        }
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (stage > 0 && depth < target_depth) break;
+        }
+        ++p;
+    }
+
+    log_text(PMLOG_LEVEL_ERROR, "localeInfo missing localeInfo.locales.UI -> forcing NULL fallback");
+    return 0;
+}
+
+EXPORT FILE *fopen64(const char *pathname, const char *mode) {
+    cache_libc_ptrs();
+    if (pathname && strcmp(pathname, "/var/luna/preferences/localeInfo") == 0) {
+        if (!validate_locale_info_file()) {
+            if (g_real_errno_loc) *g_real_errno_loc() = ENOENT;
+            return 0;
+        }
+    }
+    if (g_real_fopen64) return g_real_fopen64(pathname, mode);
+    if (g_real_fopen) return g_real_fopen(pathname, mode);
+    return 0;
+}
+
+EXPORT FILE *fopen(const char *pathname, const char *mode) {
+    cache_libc_ptrs();
+    if (pathname && strcmp(pathname, "/var/luna/preferences/localeInfo") == 0) {
+        if (!validate_locale_info_file()) {
+            if (g_real_errno_loc) *g_real_errno_loc() = ENOENT;
+            return 0;
+        }
+    }
+    if (g_real_fopen) return g_real_fopen(pathname, mode);
+    if (g_real_fopen64) return g_real_fopen64(pathname, mode);
+    return 0;
 }
 
 /* ============================================================================
@@ -621,6 +1249,101 @@ static void compat_exe_init(int argc, char **argv, char **envp) {
     }
 }
 
+static char g_patched_argv_buf[8192];
+
+static void patch_missing_appdesc_folder_path(int argc, char **ubp_av) {
+    if (!ubp_av || argc <= 1 || !g_exe_dir[0]) return;
+    unsigned int exe_len = c_strlen(g_exe_dir);
+    for (int i = 1; i < argc; ++i) {
+        const char *arg = ubp_av[i];
+        if (!arg || arg[0] != '{') continue;
+        const char *ad = c_strstr(arg, "\\"appDesc\\"");
+        if (!ad) continue;
+        if (c_strstr(arg, "\\"folderPath\\"")) continue;
+
+        const char *p = ad + 9;
+        while (*p == ' ' || *p == '\\t' || *p == '\\n' || *p == '\\r') ++p;
+        if (*p != ':') continue;
+        ++p;
+        while (*p == ' ' || *p == '\\t' || *p == '\\n' || *p == '\\r') ++p;
+
+        unsigned int arg_len = c_strlen(arg);
+        if (*p == '{') {
+            const char *insert_at = p + 1;
+            const char *q = insert_at;
+            while (*q == ' ' || *q == '\\t' || *q == '\\n' || *q == '\\r') ++q;
+            int need_comma = (*q != '}');
+            const char *prefix = "\\"folderPath\\":\\"";
+            const char *suffix = need_comma ? "\\"," : "\\"";
+            unsigned int add_len = c_strlen(prefix) + exe_len + c_strlen(suffix);
+            if (arg_len + add_len + 1U <= sizeof(g_patched_argv_buf)) {
+                unsigned int head = (unsigned int)(insert_at - arg);
+                c_memcpy(g_patched_argv_buf, arg, head);
+                unsigned int pos = head;
+                c_memcpy(g_patched_argv_buf + pos, prefix, c_strlen(prefix)); pos += c_strlen(prefix);
+                c_memcpy(g_patched_argv_buf + pos, g_exe_dir, exe_len); pos += exe_len;
+                c_memcpy(g_patched_argv_buf + pos, suffix, c_strlen(suffix)); pos += c_strlen(suffix);
+                c_memcpy(g_patched_argv_buf + pos, insert_at, arg_len - head + 1U);
+                ubp_av[i] = g_patched_argv_buf;
+                log_text(PMLOG_LEVEL_INFO, "injected missing folderPath into argv appDesc object");
+            }
+            break;
+        } else if (*p == '"' && p[1] == '{') {
+            const char *insert_at = p + 2;
+            int need_comma = (*insert_at != '}');
+            const char *prefix = "\\\\\\"folderPath\\\\\\":\\\\\\"";
+            const char *suffix = need_comma ? "\\\\\\"," : "\\\\\\"";
+            unsigned int add_len = c_strlen(prefix) + exe_len + c_strlen(suffix);
+            if (arg_len + add_len + 1U <= sizeof(g_patched_argv_buf)) {
+                unsigned int head = (unsigned int)(insert_at - arg);
+                c_memcpy(g_patched_argv_buf, arg, head);
+                unsigned int pos = head;
+                c_memcpy(g_patched_argv_buf + pos, prefix, c_strlen(prefix)); pos += c_strlen(prefix);
+                c_memcpy(g_patched_argv_buf + pos, g_exe_dir, exe_len); pos += exe_len;
+                c_memcpy(g_patched_argv_buf + pos, suffix, c_strlen(suffix)); pos += c_strlen(suffix);
+                c_memcpy(g_patched_argv_buf + pos, insert_at, arg_len - head + 1U);
+                ubp_av[i] = g_patched_argv_buf;
+                log_text(PMLOG_LEVEL_INFO, "injected missing folderPath into stringified appDesc");
+            }
+            break;
+        }
+    }
+}
+
+static void log_launch_diag(int argc, char **ubp_av) {
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "__libc_start_main argc=");
+    lbuf_i32(&b, argc);
+    lbuf_str(&b, " exe_dir=");
+    lbuf_str_trunc(&b, g_exe_dir, 140);
+    lbuf_str(&b, " appdata=");
+    lbuf_str_trunc(&b, g_appdata_dir, 140);
+    log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+
+    int max_a = argc < 4 ? argc : 4;
+    for (int i = 0; i < max_a; ++i) {
+        lbuf_init(&b);
+        lbuf_str(&b, "  argv[");
+        lbuf_i32(&b, i);
+        lbuf_str(&b, "]=");
+        lbuf_str_trunc(&b, (ubp_av && ubp_av[i]) ? ubp_av[i] : "(null)", 520);
+        log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+    }
+
+    const char *env_names[4] = {"APP_ID", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "LD_LIBRARY_PATH"};
+    lbuf_init(&b);
+    lbuf_str(&b, "  env:");
+    for (int i = 0; i < 4; ++i) {
+        const char *v = g_real_getenv ? g_real_getenv(env_names[i]) : 0;
+        lbuf_str(&b, " ");
+        lbuf_str(&b, env_names[i]);
+        lbuf_str(&b, "=");
+        lbuf_str_trunc(&b, v ? v : "<unset>", 96);
+    }
+    log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+}
+
 EXPORT int __libc_start_main(
     int (*main_fn)(int, char **, char **),
     int argc,
@@ -637,6 +1360,11 @@ EXPORT int __libc_start_main(
         void (*)(void), void (*)(void), void *
     );
 
+    ensure_compat_init();
+    if (g_real_getpid) g_main_pid = g_real_getpid();
+    log_launch_diag(argc, ubp_av);
+    patch_missing_appdesc_folder_path(argc, ubp_av);
+
     lsm_fn_t real_234 = (lsm_fn_t)dlvsym(RTLD_NEXT, "__libc_start_main", "GLIBC_2.34");
     if (real_234) {
         return real_234(main_fn, argc, ubp_av, init, fini, rtld_fini, stack_end);
@@ -650,6 +1378,7 @@ EXPORT int __libc_start_main(
         }
     }
     if (!real_204) {
+        log_text(PMLOG_LEVEL_ERROR, "__libc_start_main real_204 resolve FAILED");
         return 127;
     }
     return real_204(
@@ -790,60 +1519,113 @@ static void make_dir_writable(const char *p) {
     chmod(p, 0777);
 }
 
-static const char *get_writable_appdata_dir(void) {
-    static const char *cached_dir = 0;
-    if (cached_dir) return cached_dir;
+static void join_path(char *dst, unsigned int dst_sz, const char *base, const char *sub) {
+    unsigned int b_len = c_strlen(base);
+    if (b_len + 1U >= dst_sz) {
+        copy_str(dst, base, dst_sz);
+        return;
+    }
+    c_memcpy(dst, base, b_len);
+    if (sub && sub[0]) {
+        if (b_len > 0 && dst[b_len - 1] != '/') {
+            dst[b_len++] = '/';
+        }
+        copy_str(dst + b_len, sub, dst_sz - b_len);
+    } else {
+        dst[b_len] = '\\0';
+    }
+}
 
-    make_dir_writable("/media/developer/temp");
-    make_dir_writable("/media/developer/temp/plezy_appdata");
-    if (access("/media/developer/temp/plezy_appdata", 7) == 0) {
-        make_dir_writable("/media/developer/temp/plezy_appdata/com.edde746.plezy");
-        make_dir_writable("/media/developer/temp/plezy_appdata/.cache");
-        make_dir_writable("/media/developer/temp/plezy_appdata/.cache/com.edde746.plezy");
-        make_dir_writable("/media/developer/temp/plezy_appdata/.data");
-        make_dir_writable("/media/developer/temp/plezy_appdata/.data/com.edde746.plezy");
-        make_dir_writable("/media/developer/temp/plezy_appdata/.download");
-        make_dir_writable("/media/developer/temp/plezy_appdata/.download/com.edde746.plezy");
-        make_dir_writable("/media/developer/temp/plezy_appdata/log");
-        cached_dir = "/media/developer/temp/plezy_appdata";
-        return cached_dir;
+static void populate_exe_dir(void) {
+    if (g_exe_dir[0]) return;
+    fn_readlink_t fn_rl = g_real_readlink ? g_real_readlink : readlink;
+    char exe_buf[512];
+    int n = fn_rl("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+    if (n > 0) {
+        exe_buf[n] = '\\0';
+        int last_slash = -1;
+        for (int i = 0; i < n; ++i) {
+            if (exe_buf[i] == '/') last_slash = i;
+        }
+        if (last_slash > 0) {
+            exe_buf[last_slash] = '\\0';
+            copy_str(g_exe_dir, exe_buf, sizeof(g_exe_dir));
+        }
+    }
+}
+
+static int probe_writable_dir(const char *cand) {
+    fn_open_t fn_open = g_real_open ? g_real_open : open;
+    fn_write_t fn_write = g_real_write ? g_real_write : write;
+    fn_close_t fn_close = g_real_close ? g_real_close : close;
+    if (!cand || !cand[0]) return 0;
+
+    make_dir_writable(cand);
+    char log_sub[512], probe_path[512];
+    join_path(log_sub, sizeof(log_sub), cand, "log");
+    make_dir_writable(log_sub);
+    join_path(probe_path, sizeof(probe_path), log_sub, ".probe");
+
+    int fd = fn_open(probe_path, COMPAT_O_CREAT | COMPAT_O_WRONLY | COMPAT_O_TRUNC | COMPAT_O_CLOEXEC, 0666);
+    if (fd < 0) return 0;
+    int nw = fn_write(fd, "1", 1);
+    fn_close(fd);
+    unlink(probe_path);
+    if (nw != 1) return 0;
+
+    char sub[512];
+    const char *subdirs[7] = {
+        "com.edde746.plezy",
+        ".cache", ".cache/com.edde746.plezy",
+        ".data", ".data/com.edde746.plezy",
+        ".download", ".download/com.edde746.plezy"
+    };
+    for (int i = 0; i < 7; ++i) {
+        join_path(sub, sizeof(sub), cand, subdirs[i]);
+        make_dir_writable(sub);
     }
 
-    make_dir_writable("/tmp/plezy_appdata");
-    make_dir_writable("/tmp/plezy_appdata/com.edde746.plezy");
-    make_dir_writable("/tmp/plezy_appdata/.cache");
-    make_dir_writable("/tmp/plezy_appdata/.cache/com.edde746.plezy");
-    make_dir_writable("/tmp/plezy_appdata/.data");
-    make_dir_writable("/tmp/plezy_appdata/.data/com.edde746.plezy");
-    make_dir_writable("/tmp/plezy_appdata/.download");
-    make_dir_writable("/tmp/plezy_appdata/.download/com.edde746.plezy");
-    make_dir_writable("/tmp/plezy_appdata/log");
-    cached_dir = "/tmp/plezy_appdata";
-    return cached_dir;
+    copy_str(g_appdata_dir, cand, sizeof(g_appdata_dir));
+    join_path(g_cache_dir, sizeof(g_cache_dir), cand, ".cache");
+    join_path(g_download_dir, sizeof(g_download_dir), cand, ".download");
+    join_path(g_log_dir, sizeof(g_log_dir), cand, "log");
+    join_path(g_boot_log_path, sizeof(g_boot_log_path), g_log_dir, "boot.log");
+    return 1;
+}
+
+static const char *get_writable_appdata_dir(void) {
+    static int probed = 0;
+    if (probed) return g_appdata_dir;
+    probed = 1;
+
+    cache_libc_ptrs();
+    populate_exe_dir();
+    make_dir_writable("/media/developer/temp");
+
+    if (probe_writable_dir("/media/developer/temp/plezy_appdata")) return g_appdata_dir;
+    if (probe_writable_dir("/tmp/plezy_appdata")) return g_appdata_dir;
+    if (g_exe_dir[0]) {
+        char exe_app[512];
+        join_path(exe_app, sizeof(exe_app), g_exe_dir, "appdata");
+        if (probe_writable_dir(exe_app)) return g_appdata_dir;
+    }
+    if (probe_writable_dir("/var/tmp/plezy_appdata")) return g_appdata_dir;
+    return g_appdata_dir;
 }
 
 static const char *get_writable_cache_dir(void) {
-    const char *base = get_writable_appdata_dir();
-    if (strcmp(base, "/media/developer/temp/plezy_appdata") == 0) {
-        return "/media/developer/temp/plezy_appdata/.cache";
-    }
-    return "/tmp/plezy_appdata/.cache";
+    (void)get_writable_appdata_dir();
+    return g_cache_dir;
 }
 
 static const char *get_writable_download_dir(void) {
-    const char *base = get_writable_appdata_dir();
-    if (strcmp(base, "/media/developer/temp/plezy_appdata") == 0) {
-        return "/media/developer/temp/plezy_appdata/.download";
-    }
-    return "/tmp/plezy_appdata/.download";
+    (void)get_writable_appdata_dir();
+    return g_download_dir;
 }
 
 static const char *get_writable_log_dir(void) {
-    const char *base = get_writable_appdata_dir();
-    if (strcmp(base, "/media/developer/temp/plezy_appdata") == 0) {
-        return "/media/developer/temp/plezy_appdata/log";
-    }
-    return "/tmp/plezy_appdata/log";
+    (void)get_writable_appdata_dir();
+    return g_log_dir;
 }
 
 static const char *map_env_var(const char *name) {
@@ -869,56 +1651,79 @@ static const char *map_env_var(const char *name) {
 }
 
 EXPORT int setenv(const char *name, const char *value, int overwrite) {
-    typedef int (*setenv_fn_t)(const char *, const char *, int);
-    setenv_fn_t real_setenv = (setenv_fn_t)resolve_libc_sym("setenv");
-    if (!real_setenv) return -1;
+    cache_libc_ptrs();
+    if (!g_real_setenv) return -1;
 
     const char *mapped = map_env_var(name);
     if (mapped) {
-        return real_setenv(name, mapped, 1);
+        return g_real_setenv(name, mapped, 1);
     }
-    return real_setenv(name, value, overwrite);
+    return g_real_setenv(name, value, overwrite);
 }
 
 EXPORT char *getenv(const char *name) {
-    typedef char *(*getenv_fn_t)(const char *);
-    getenv_fn_t real_getenv = (getenv_fn_t)resolve_libc_sym("getenv");
-
+    cache_libc_ptrs();
     if (name) {
         const char *mapped = map_env_var(name);
         if (mapped) {
             return (char *)mapped;
         }
         if (strcmp(name, "APP_ID") == 0 || strcmp(name, "FLUTTER_APP_ID") == 0) {
-            char *val = real_getenv ? real_getenv(name) : 0;
+            char *val = g_real_getenv ? g_real_getenv(name) : 0;
             if (!val || !val[0]) return "com.edde746.plezy";
             return val;
         }
     }
-    return real_getenv ? real_getenv(name) : 0;
+    return g_real_getenv ? g_real_getenv(name) : 0;
 }
 
-__attribute__((constructor))
-static void init_webos_compat32(void) {
-    typedef int (*setenv_fn_t)(const char *, const char *, int);
-    setenv_fn_t real_setenv = (setenv_fn_t)resolve_libc_sym("setenv");
+static void ensure_compat_init(void) {
+    static int init_done = 0;
+    if (init_done) return;
+    init_done = 1;
+
+    cache_libc_ptrs();
+    if (g_real_getpid && g_main_pid < 0) g_main_pid = g_real_getpid();
+    populate_exe_dir();
     const char *dir = get_writable_appdata_dir();
     const char *cache_dir = get_writable_cache_dir();
     const char *dl_dir = get_writable_download_dir();
     const char *log_dir = get_writable_log_dir();
-    if (real_setenv && dir) {
-        real_setenv("APP_ID", "com.edde746.plezy", 0);
-        real_setenv("FLUTTER_APP_ID", "com.edde746.plezy", 0);
-        real_setenv("FLUTTER_HOME", dir, 1);
-        real_setenv("FLUTTER_APPDATA_HOME", dir, 1);
-        real_setenv("FLUTTER_TEMP_HOME", cache_dir, 1);
-        real_setenv("FLUTTER_DOWNLOAD_HOME", dl_dir, 1);
-        real_setenv("FLUTTER_EXT_STORAGE_PATH", dir, 1);
-        real_setenv("FLUTTER_APP_LOG_PATH", log_dir, 1);
-        real_setenv("XDG_DATA_HOME", dir, 1);
-        real_setenv("XDG_CONFIG_HOME", dir, 1);
-        real_setenv("XDG_CACHE_HOME", cache_dir, 1);
+
+    init_pmlog();
+    install_crash_handlers();
+
+    if (g_real_setenv && dir) {
+        g_real_setenv("APP_ID", "com.edde746.plezy", 0);
+        g_real_setenv("FLUTTER_APP_ID", "com.edde746.plezy", 0);
+        g_real_setenv("FLUTTER_HOME", dir, 1);
+        g_real_setenv("FLUTTER_APPDATA_HOME", dir, 1);
+        g_real_setenv("FLUTTER_TEMP_HOME", cache_dir, 1);
+        g_real_setenv("FLUTTER_DOWNLOAD_HOME", dl_dir, 1);
+        g_real_setenv("FLUTTER_EXT_STORAGE_PATH", dir, 1);
+        g_real_setenv("FLUTTER_APP_LOG_PATH", log_dir, 1);
+        g_real_setenv("XDG_DATA_HOME", dir, 1);
+        g_real_setenv("XDG_CONFIG_HOME", dir, 1);
+        g_real_setenv("XDG_CACHE_HOME", cache_dir, 1);
     }
+
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "=== compat32 ctor init pid=");
+    lbuf_i32(&b, g_real_getpid ? g_real_getpid() : 0);
+    lbuf_str(&b, " uid=");
+    lbuf_u32(&b, g_real_getuid ? g_real_getuid() : 0U);
+    lbuf_str(&b, " exe_dir=");
+    lbuf_str_trunc(&b, g_exe_dir, 140);
+    lbuf_str(&b, " appdata=");
+    lbuf_str_trunc(&b, g_appdata_dir, 140);
+    lbuf_str(&b, " ===");
+    log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+}
+
+__attribute__((constructor))
+static void init_webos_compat32(void) {
+    ensure_compat_init();
 }
 
 /* ============================================================================
@@ -1088,6 +1893,1005 @@ EXPORT void *wl_proxy_marshal_flags(
         if (destroy_fn) destroy_fn(proxy);
     }
     return res;
+}
+
+EXPORT void *wl_display_connect(const char *name) {
+    typedef void *(*fn_wl_conn_t)(const char *);
+    static int logged_ok = 0;
+    ensure_compat_init();
+
+    fn_wl_conn_t real_fn = (fn_wl_conn_t)resolve_wl_sym("wl_display_connect");
+    if (!real_fn || real_fn == wl_display_connect) {
+        log_text(PMLOG_LEVEL_ERROR, "wl_display_connect resolve FAILED");
+        return 0;
+    }
+
+    void *dpy = real_fn(name);
+    if (dpy) {
+        if (!logged_ok) {
+            logged_ok = 1;
+            struct log_buf b;
+            lbuf_init(&b);
+            lbuf_str(&b, "wl_display_connect ok name=");
+            lbuf_str_trunc(&b, name ? name : "(null)", 80);
+            lbuf_str(&b, " XDG_RUNTIME_DIR=");
+            const char *xdg = g_real_getenv ? g_real_getenv("XDG_RUNTIME_DIR") : 0;
+            lbuf_str_trunc(&b, xdg ? xdg : "<unset>", 96);
+            lbuf_str(&b, " WAYLAND_DISPLAY=");
+            const char *wd = g_real_getenv ? g_real_getenv("WAYLAND_DISPLAY") : 0;
+            lbuf_str_trunc(&b, wd ? wd : "<unset>", 64);
+            log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+        }
+        return dpy;
+    }
+
+    const char *cur_xdg = g_real_getenv ? g_real_getenv("XDG_RUNTIME_DIR") : 0;
+    const char *cur_wd  = g_real_getenv ? g_real_getenv("WAYLAND_DISPLAY") : 0;
+    char orig_xdg[256], orig_wd[128];
+    copy_str(orig_xdg, cur_xdg ? cur_xdg : "", sizeof(orig_xdg));
+    copy_str(orig_wd, cur_wd ? cur_wd : "", sizeof(orig_wd));
+
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "wl_display_connect FAILED name=");
+    lbuf_str_trunc(&b, name ? name : "(null)", 80);
+    lbuf_str(&b, " XDG_RUNTIME_DIR=");
+    lbuf_str_trunc(&b, orig_xdg[0] ? orig_xdg : "<unset>", 96);
+    lbuf_str(&b, " WAYLAND_DISPLAY=");
+    lbuf_str_trunc(&b, orig_wd[0] ? orig_wd : "<unset>", 64);
+    log_raw_line(PMLOG_LEVEL_ERROR, &b, 1);
+
+    const char *cand_dirs[6] = {
+        orig_xdg[0] ? orig_xdg : 0,
+        "/tmp/xdg",
+        "/run/user/0",
+        "/run",
+        "/var/run",
+        "/tmp"
+    };
+    const char *cand_socks[3] = {
+        (name && name[0]) ? name : (orig_wd[0] ? orig_wd : 0),
+        "wayland-0",
+        "wayland-1"
+    };
+
+    for (int di = 0; di < 6; ++di) {
+        const char *dir = cand_dirs[di];
+        if (!dir || !dir[0]) continue;
+        for (int si = 0; si < 3; ++si) {
+            const char *sock = cand_socks[si];
+            if (!sock || !sock[0] || sock[0] == '/') continue;
+            char full[384];
+            join_path(full, sizeof(full), dir, sock);
+            if (access(full, 0) != 0) continue;
+
+            if (g_real_setenv) {
+                g_real_setenv("XDG_RUNTIME_DIR", dir, 1);
+                if (!name) g_real_setenv("WAYLAND_DISPLAY", sock, 1);
+            }
+            if (!name || name[0] != '/') {
+                dpy = real_fn(name);
+            }
+            if (!dpy) {
+                dpy = real_fn(full);
+            }
+            if (dpy) {
+                lbuf_init(&b);
+                lbuf_str(&b, "wl_display_connect RECOVERED socket=");
+                lbuf_str_trunc(&b, full, 160);
+                log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+                return dpy;
+            }
+        }
+    }
+
+    if (g_real_setenv && orig_xdg[0]) g_real_setenv("XDG_RUNTIME_DIR", orig_xdg, 1);
+    if (g_real_setenv && orig_wd[0])  g_real_setenv("WAYLAND_DISPLAY", orig_wd, 1);
+    log_text(PMLOG_LEVEL_ERROR, "wl_display_connect ALL FALLBACK PROBES FAILED");
+    return 0;
+}
+
+/* ============================================================================
+ * EGL Config/Context/Surface Resilience & Diagnostics (Mali / webOS 6)
+ * ============================================================================ */
+#define COMPAT_EGL_ALPHA_SIZE            0x3021
+#define COMPAT_EGL_BLUE_SIZE             0x3022
+#define COMPAT_EGL_GREEN_SIZE            0x3023
+#define COMPAT_EGL_RED_SIZE              0x3024
+#define COMPAT_EGL_DEPTH_SIZE            0x3025
+#define COMPAT_EGL_STENCIL_SIZE          0x3026
+#define COMPAT_EGL_SAMPLES               0x3031
+#define COMPAT_EGL_SAMPLE_BUFFERS        0x3032
+#define COMPAT_EGL_SURFACE_TYPE          0x3033
+#define COMPAT_EGL_WINDOW_BIT            0x0004
+#define COMPAT_EGL_NONE                  0x3038
+#define COMPAT_EGL_RENDERABLE_TYPE       0x3040
+#define COMPAT_EGL_OPENGL_ES2_BIT        0x0004
+#define COMPAT_EGL_CONTEXT_CLIENT_VERSION 0x3098
+
+static void *resolve_egl_sym(const char *name, void *self_fn) {
+    static void *egl_h = 0;
+    static void *mali_h = 0;
+    void *fn = dlsym(RTLD_NEXT, name);
+    if (fn && fn != self_fn) return fn;
+    if (!egl_h) {
+        egl_h = dlopen("libEGL.so.1", RTLD_LAZY);
+        if (!egl_h) egl_h = dlopen("/usr/lib/libEGL.so.1", RTLD_LAZY);
+    }
+    if (egl_h) {
+        fn = dlsym(egl_h, name);
+        if (fn && fn != self_fn) return fn;
+    }
+    if (!mali_h) {
+        mali_h = dlopen("libmali.so.0", RTLD_LAZY);
+        if (!mali_h) mali_h = dlopen("/usr/lib/libmali.so.0", RTLD_LAZY);
+    }
+    if (mali_h) {
+        fn = dlsym(mali_h, name);
+        if (fn && fn != self_fn) return fn;
+    }
+    return 0;
+}
+
+static int32_t compat_egl_get_error(void) {
+    typedef int32_t (*fn_err_t)(void);
+    fn_err_t fn = (fn_err_t)resolve_egl_sym("eglGetError", 0);
+    return fn ? fn() : -1;
+}
+
+static void log_egl_attribs(const char *prefix, const int32_t *attrib_list, int32_t egl_err) {
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, prefix);
+    lbuf_str(&b, " eglGetError=");
+    lbuf_hex32(&b, (uint32_t)egl_err);
+    lbuf_str(&b, " attrs:");
+    if (!attrib_list) {
+        lbuf_str(&b, " (null)");
+    } else {
+        for (int i = 0; i < 32; i += 2) {
+            int32_t k = attrib_list[i];
+            if (k == COMPAT_EGL_NONE) {
+                lbuf_str(&b, " NONE");
+                break;
+            }
+            int32_t v = attrib_list[i + 1];
+            lbuf_str(&b, " ");
+            lbuf_hex32(&b, (uint32_t)k);
+            lbuf_str(&b, "=");
+            lbuf_i32(&b, v);
+        }
+    }
+    log_raw_line(PMLOG_LEVEL_ERROR, &b, 1);
+}
+
+EXPORT unsigned int eglChooseConfig(
+    void *dpy,
+    const int32_t *attrib_list,
+    void **configs,
+    int32_t config_size,
+    int32_t *num_config
+) {
+    typedef unsigned int (*fn_cc_t)(void *, const int32_t *, void **, int32_t, int32_t *);
+    static int logged_ok = 0;
+    fn_cc_t real_fn = (fn_cc_t)resolve_egl_sym("eglChooseConfig", (void *)eglChooseConfig);
+    if (!real_fn) {
+        log_text(PMLOG_LEVEL_ERROR, "eglChooseConfig resolve FAILED");
+        return 0;
+    }
+
+    int32_t local_num = 0;
+    int32_t *cnt_ptr = num_config ? num_config : &local_num;
+    unsigned int ret = real_fn(dpy, attrib_list, configs, config_size, cnt_ptr);
+    if (ret == 1U && *cnt_ptr > 0) {
+        if (!logged_ok) {
+            logged_ok = 1;
+            log_text(PMLOG_LEVEL_INFO, "eglChooseConfig strict succeeded");
+        }
+        return ret;
+    }
+
+    log_egl_attribs("eglChooseConfig strict FAILED", attrib_list, compat_egl_get_error());
+
+    /* Pass 1: strip MSAA/depth/stencil and normalize EGL_SURFACE_TYPE -> EGL_WINDOW_BIT */
+    if (attrib_list) {
+        int32_t relaxed[64];
+        int out_i = 0;
+        for (int i = 0; i + 1 < 62 && out_i + 3 < 64; i += 2) {
+            int32_t k = attrib_list[i];
+            if (k == COMPAT_EGL_NONE) break;
+            int32_t v = attrib_list[i + 1];
+            if (k == COMPAT_EGL_SAMPLE_BUFFERS || k == COMPAT_EGL_SAMPLES ||
+                k == COMPAT_EGL_DEPTH_SIZE || k == COMPAT_EGL_STENCIL_SIZE) {
+                continue;
+            }
+            if (k == COMPAT_EGL_SURFACE_TYPE) {
+                v = COMPAT_EGL_WINDOW_BIT;
+            }
+            relaxed[out_i++] = k;
+            relaxed[out_i++] = v;
+        }
+        relaxed[out_i] = COMPAT_EGL_NONE;
+        *cnt_ptr = 0;
+        ret = real_fn(dpy, relaxed, configs, config_size, cnt_ptr);
+        if (ret == 1U && *cnt_ptr > 0) {
+            log_text(PMLOG_LEVEL_INFO, "eglChooseConfig RECOVERED via Pass 1 (filtered caller attribs)");
+            return ret;
+        }
+    }
+
+    /* Pass 2: ES2 RGBA8888 window */
+    static const int32_t pass2_rgba[] = {
+        COMPAT_EGL_RENDERABLE_TYPE, COMPAT_EGL_OPENGL_ES2_BIT,
+        COMPAT_EGL_SURFACE_TYPE, COMPAT_EGL_WINDOW_BIT,
+        COMPAT_EGL_RED_SIZE, 8,
+        COMPAT_EGL_GREEN_SIZE, 8,
+        COMPAT_EGL_BLUE_SIZE, 8,
+        COMPAT_EGL_ALPHA_SIZE, 8,
+        COMPAT_EGL_NONE
+    };
+    *cnt_ptr = 0;
+    ret = real_fn(dpy, pass2_rgba, configs, config_size, cnt_ptr);
+    if (ret == 1U && *cnt_ptr > 0) {
+        log_text(PMLOG_LEVEL_INFO, "eglChooseConfig RECOVERED via Pass 2 (ES2 RGBA8888)");
+        return ret;
+    }
+
+    /* Pass 3: ES2 RGB888 window */
+    static const int32_t pass3_rgb[] = {
+        COMPAT_EGL_RENDERABLE_TYPE, COMPAT_EGL_OPENGL_ES2_BIT,
+        COMPAT_EGL_SURFACE_TYPE, COMPAT_EGL_WINDOW_BIT,
+        COMPAT_EGL_RED_SIZE, 8,
+        COMPAT_EGL_GREEN_SIZE, 8,
+        COMPAT_EGL_BLUE_SIZE, 8,
+        COMPAT_EGL_NONE
+    };
+    *cnt_ptr = 0;
+    ret = real_fn(dpy, pass3_rgb, configs, config_size, cnt_ptr);
+    if (ret == 1U && *cnt_ptr > 0) {
+        log_text(PMLOG_LEVEL_INFO, "eglChooseConfig RECOVERED via Pass 3 (ES2 RGB888)");
+        return ret;
+    }
+
+    /* Pass 4: minimal ES2 & unfiltered wildcard */
+    static const int32_t pass4_min[] = {
+        COMPAT_EGL_RENDERABLE_TYPE, COMPAT_EGL_OPENGL_ES2_BIT,
+        COMPAT_EGL_NONE
+    };
+    *cnt_ptr = 0;
+    ret = real_fn(dpy, pass4_min, configs, config_size, cnt_ptr);
+    if (ret == 1U && *cnt_ptr > 0) {
+        log_text(PMLOG_LEVEL_INFO, "eglChooseConfig RECOVERED via Pass 4 (minimal ES2)");
+        return ret;
+    }
+
+    static const int32_t pass5_any[] = { COMPAT_EGL_NONE };
+    *cnt_ptr = 0;
+    ret = real_fn(dpy, pass5_any, configs, config_size, cnt_ptr);
+    if (ret == 1U && *cnt_ptr > 0) {
+        log_text(PMLOG_LEVEL_INFO, "eglChooseConfig RECOVERED via Pass 5 (EGL_NONE wildcard)");
+        return ret;
+    }
+
+    log_egl_attribs("eglChooseConfig ALL PASSES FAILED", 0, compat_egl_get_error());
+    return ret;
+}
+
+EXPORT void *eglCreateContext(
+    void *dpy,
+    void *config,
+    void *share_context,
+    const int32_t *attrib_list
+) {
+    typedef void *(*fn_ctx_t)(void *, void *, void *, const int32_t *);
+    static int logged_ok = 0;
+    fn_ctx_t real_fn = (fn_ctx_t)resolve_egl_sym("eglCreateContext", (void *)eglCreateContext);
+    if (!real_fn) {
+        log_text(PMLOG_LEVEL_ERROR, "eglCreateContext resolve FAILED");
+        return 0;
+    }
+
+    void *ctx = real_fn(dpy, config, share_context, attrib_list);
+    if (ctx) {
+        if (!logged_ok) {
+            logged_ok = 1;
+            log_text(PMLOG_LEVEL_INFO, "eglCreateContext succeeded");
+        }
+        return ctx;
+    }
+
+    log_egl_attribs("eglCreateContext FAILED", attrib_list, compat_egl_get_error());
+
+    /* Fallback if GLES 3 context requested on an ES2-only config */
+    if (attrib_list) {
+        int want_es3 = 0;
+        for (int i = 0; i < 16 && attrib_list[i] != COMPAT_EGL_NONE; i += 2) {
+            if (attrib_list[i] == COMPAT_EGL_CONTEXT_CLIENT_VERSION && attrib_list[i + 1] > 2) {
+                want_es3 = 1;
+                break;
+            }
+        }
+        if (want_es3) {
+            static const int32_t es2_attrs[] = { COMPAT_EGL_CONTEXT_CLIENT_VERSION, 2, COMPAT_EGL_NONE };
+            ctx = real_fn(dpy, config, share_context, es2_attrs);
+            if (ctx) {
+                log_text(PMLOG_LEVEL_INFO, "eglCreateContext RECOVERED via ES2 fallback");
+                return ctx;
+            }
+        }
+    }
+    return 0;
+}
+
+EXPORT void *eglCreateWindowSurface(
+    void *dpy,
+    void *config,
+    uintptr_t win,
+    const int32_t *attrib_list
+) {
+    typedef void *(*fn_ws_t)(void *, void *, uintptr_t, const int32_t *);
+    static int logged_ok = 0;
+    fn_ws_t real_fn = (fn_ws_t)resolve_egl_sym("eglCreateWindowSurface", (void *)eglCreateWindowSurface);
+    if (!real_fn) {
+        log_text(PMLOG_LEVEL_ERROR, "eglCreateWindowSurface resolve FAILED");
+        return 0;
+    }
+
+    void *surf = real_fn(dpy, config, win, attrib_list);
+    if (surf) {
+        if (!logged_ok) {
+            logged_ok = 1;
+            log_text(PMLOG_LEVEL_INFO, "eglCreateWindowSurface succeeded");
+        }
+        return surf;
+    }
+
+    log_egl_attribs("eglCreateWindowSurface FAILED", attrib_list, compat_egl_get_error());
+    if (attrib_list && attrib_list[0] != COMPAT_EGL_NONE) {
+        static const int32_t empty_attrs[] = { COMPAT_EGL_NONE };
+        surf = real_fn(dpy, config, win, empty_attrs);
+        if (surf) {
+            log_text(PMLOG_LEVEL_INFO, "eglCreateWindowSurface RECOVERED with empty attribs");
+            return surf;
+        }
+    }
+    return 0;
+}
+
+/* ============================================================================
+ * Luna Service 2 (LS*) Resilience & Internal RapidJSON Guard (webOS 6 ACG)
+ * ============================================================================ */
+typedef int (*compat_ls_cb_t)(void *sh, void *msg, void *ctx);
+
+#define COMPAT_LS_FAKE_COUNT 64
+#define COMPAT_LS_SLOT_COUNT 256
+
+static char g_fake_ls_handles[COMPAT_LS_FAKE_COUNT];
+static uint32_t g_fake_ls_next = 0;
+
+struct compat_ls_slot {
+    int used;
+    int one_shot;
+    int is_internal;
+    void *sh;
+    uint32_t token;
+    uint32_t seq;
+    compat_ls_cb_t orig_cb;
+    void *orig_ctx;
+    char uri[128];
+};
+
+static struct compat_ls_slot g_ls_slots[COMPAT_LS_SLOT_COUNT];
+static volatile int g_ls_lock = 0;
+static uint32_t g_ls_seq = 0;
+static uint32_t g_ls_call_logs = 0;
+static uint32_t g_ls_reply_logs = 0;
+
+static void compat_ls_acquire(void) {
+    while (__atomic_test_and_set(&g_ls_lock, __ATOMIC_ACQUIRE)) {}
+}
+
+static void compat_ls_release(void) {
+    __atomic_clear(&g_ls_lock, __ATOMIC_RELEASE);
+}
+
+static int is_fake_ls_handle(const void *sh) {
+    return sh >= (const void *)g_fake_ls_handles &&
+           sh < (const void *)(g_fake_ls_handles + COMPAT_LS_FAKE_COUNT);
+}
+
+static void *alloc_fake_ls_handle(void) {
+    uint32_t idx = __atomic_fetch_add(&g_fake_ls_next, 1U, __ATOMIC_RELAXED) % COMPAT_LS_FAKE_COUNT;
+    return (void *)&g_fake_ls_handles[idx];
+}
+
+static void *resolve_ls_sym(const char *name, void *self_fn) {
+    static void *ls_h = 0;
+    void *fn = dlsym(RTLD_NEXT, name);
+    if (fn && fn != self_fn) return fn;
+    if (!ls_h) {
+        ls_h = dlopen("libluna-service2.so.3", RTLD_LAZY);
+        if (!ls_h) ls_h = dlopen("/usr/lib/libluna-service2.so.3", RTLD_LAZY);
+    }
+    if (ls_h) {
+        fn = dlsym(ls_h, name);
+        if (fn && fn != self_fn) return fn;
+    }
+    return 0;
+}
+
+static void safe_clear_lserror(void *err) {
+    if (!err) return;
+    typedef void (*fn_ls_err_t)(void *);
+    fn_ls_err_t fn_free = (fn_ls_err_t)resolve_ls_sym("LSErrorFree", 0);
+    fn_ls_err_t fn_init = (fn_ls_err_t)resolve_ls_sym("LSErrorInit", 0);
+    if (fn_free) fn_free(err);
+    if (fn_init) fn_init(err);
+}
+
+static void log_ls_error(const char *op, const char *detail, void *err) {
+    typedef int (*fn_isset_t)(const void *);
+    const char *msg = 0;
+    if (err) {
+        fn_isset_t fn_isset = (fn_isset_t)resolve_ls_sym("LSErrorIsSet", 0);
+        if (!fn_isset || fn_isset(err)) {
+            /* LSError layout: int error_code; char *message; ... */
+            msg = ((const char * const *)err)[1];
+        }
+    }
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "LS2 ");
+    lbuf_str(&b, op);
+    lbuf_str(&b, " FAILED");
+    if (detail && detail[0]) {
+        lbuf_str(&b, " [");
+        lbuf_str_trunc(&b, detail, 140);
+        lbuf_str(&b, "]");
+    }
+    if (msg && msg[0]) {
+        lbuf_str(&b, " err=");
+        lbuf_str_trunc(&b, msg, 180);
+    }
+    log_raw_line(PMLOG_LEVEL_ERROR, &b, 1);
+}
+
+static int is_internal_embedder_ls_call(const char *uri, const char *payload) {
+    if (!uri) return 0;
+    if (c_strstr(uri, "registerServerStatus")) return 1;
+    if (c_strstr(uri, "com.webos.service.applicationmanager/registerApp")) return 1;
+    if (c_strstr(uri, "com.webos.service.tvpower")) return 1;
+    if (c_strstr(uri, "screensaver") || c_strstr(uri, "service.sm")) return 1;
+    if (c_strstr(uri, "com.webos.settingsservice") && payload &&
+        (c_strstr(payload, "localeInfo") || c_strstr(payload, "audioGuidance") || c_strstr(payload, "highContrast"))) {
+        return 1;
+    }
+    return 0;
+}
+
+static int ls_payload_unsafe_for_internal(const char *uri, const char *payload) {
+    if (!payload || !payload[0]) return 1;
+    const char *p = payload;
+    while (*p == ' ' || *p == '\\t' || *p == '\\n' || *p == '\\r') ++p;
+    if (*p != '{') return 1;
+    if (c_strstr(payload, "\\"errorCode\\"")) return 1;
+    if (c_strstr(payload, "\\"returnValue\\":false") || c_strstr(payload, "\\"returnValue\\": false")) {
+        return 1;
+    }
+    if (c_strstr(uri, "registerServerStatus")) {
+        if (!c_strstr(payload, "\\"serviceName\\"") || !c_strstr(payload, "\\"connected\\"")) {
+            return 1;
+        }
+    }
+    if (c_strstr(uri, "com.webos.settingsservice")) {
+        if (!c_strstr(payload, "\\"settings\\"") && !c_strstr(payload, "\\"method\\"")) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int compat_ls_reply_filter(void *sh, void *msg, void *slot_ctx) {
+    typedef const char *(*fn_get_payload_t)(void *);
+    compat_ls_cb_t orig_cb = 0;
+    void *orig_ctx = 0;
+    int is_internal = 0;
+    int one_shot = 0;
+    uint32_t seq = 0;
+    char uri_copy[128];
+    uri_copy[0] = '\\0';
+
+    struct compat_ls_slot *slot = (struct compat_ls_slot *)slot_ctx;
+    int valid_slot = (slot >= &g_ls_slots[0] && slot < &g_ls_slots[COMPAT_LS_SLOT_COUNT]);
+
+    if (valid_slot) {
+        compat_ls_acquire();
+        if (slot->used) {
+            orig_cb = slot->orig_cb;
+            orig_ctx = slot->orig_ctx;
+            is_internal = slot->is_internal;
+            one_shot = slot->one_shot;
+            seq = slot->seq;
+            copy_str(uri_copy, slot->uri, sizeof(uri_copy));
+        }
+        compat_ls_release();
+    }
+
+    fn_get_payload_t fn_payload = (fn_get_payload_t)resolve_ls_sym("LSMessageGetPayload", 0);
+    const char *payload = (fn_payload && msg) ? fn_payload(msg) : 0;
+
+    if (g_ls_reply_logs < 100U) {
+        ++g_ls_reply_logs;
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "LS2 reply uri=");
+        lbuf_str_trunc(&b, uri_copy[0] ? uri_copy : "(unknown)", 96);
+        lbuf_str(&b, " payload=");
+        lbuf_str_trunc(&b, payload ? payload : "(null)", 180);
+        log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+    }
+
+    if (is_internal && ls_payload_unsafe_for_internal(uri_copy, payload)) {
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "LS2 SUPPRESSED internal unsafe reply uri=");
+        lbuf_str_trunc(&b, uri_copy, 96);
+        lbuf_str(&b, " payload=");
+        lbuf_str_trunc(&b, payload ? payload : "(null)", 180);
+        log_raw_line(PMLOG_LEVEL_ERROR, &b, 1);
+        if (one_shot && valid_slot) {
+            compat_ls_acquire();
+            if (slot->used && slot->seq == seq) slot->used = 0;
+            compat_ls_release();
+        }
+        return 1;
+    }
+
+    int ret = 1;
+    if (orig_cb) {
+        ret = orig_cb(sh, msg, orig_ctx);
+    }
+
+    if (one_shot && valid_slot) {
+        compat_ls_acquire();
+        if (slot->used && slot->seq == seq) slot->used = 0;
+        compat_ls_release();
+    }
+    return ret;
+}
+
+static struct compat_ls_slot *alloc_ls_slot(
+    void *sh,
+    const char *uri,
+    const char *payload,
+    compat_ls_cb_t cb,
+    void *ctx,
+    int one_shot,
+    uint32_t *out_seq
+) {
+    compat_ls_acquire();
+    struct compat_ls_slot *found = 0;
+    for (int i = 0; i < COMPAT_LS_SLOT_COUNT; ++i) {
+        if (!g_ls_slots[i].used) {
+            found = &g_ls_slots[i];
+            break;
+        }
+    }
+    if (found) {
+        uint32_t seq = ++g_ls_seq;
+        if (seq == 0) seq = ++g_ls_seq;
+        found->used = 1;
+        found->one_shot = one_shot;
+        found->is_internal = is_internal_embedder_ls_call(uri, payload);
+        found->sh = sh;
+        found->token = 0;
+        found->seq = seq;
+        found->orig_cb = cb;
+        found->orig_ctx = ctx;
+        copy_str(found->uri, uri ? uri : "", sizeof(found->uri));
+        if (out_seq) *out_seq = seq;
+    }
+    compat_ls_release();
+    return found;
+}
+
+static void finish_ls_slot(struct compat_ls_slot *slot, uint32_t seq, void *sh, int ok, const uint32_t *ret_token) {
+    if (!slot) return;
+    compat_ls_acquire();
+    if (slot->used && slot->seq == seq) {
+        if (ok && ret_token && *ret_token != 0) {
+            slot->sh = sh;
+            slot->token = *ret_token;
+        } else if (!ok) {
+            slot->used = 0;
+        }
+    }
+    compat_ls_release();
+}
+
+static void clear_ls_slots_for_token(void *sh, uint32_t token) {
+    compat_ls_acquire();
+    for (int i = 0; i < COMPAT_LS_SLOT_COUNT; ++i) {
+        if (g_ls_slots[i].used && g_ls_slots[i].sh == sh && g_ls_slots[i].token == token) {
+            g_ls_slots[i].used = 0;
+        }
+    }
+    compat_ls_release();
+}
+
+static void clear_ls_slots_for_handle(void *sh) {
+    compat_ls_acquire();
+    for (int i = 0; i < COMPAT_LS_SLOT_COUNT; ++i) {
+        if (g_ls_slots[i].used && g_ls_slots[i].sh == sh) {
+            g_ls_slots[i].used = 0;
+        }
+    }
+    compat_ls_release();
+}
+
+EXPORT int LSRegister(const char *name, void **sh, void *err) {
+    typedef int (*fn_t)(const char *, void **, void *);
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSRegister", (void *)LSRegister);
+    if (real_fn) {
+        if (real_fn(name, sh, err) && sh && *sh) {
+            log_text(PMLOG_LEVEL_INFO, name ? "LSRegister(named) ok" : "LSRegister(anon) ok");
+            return 1;
+        }
+        log_ls_error("LSRegister", name ? name : "(null)", err);
+        safe_clear_lserror(err);
+        if (name) {
+            if (real_fn(0, sh, err) && sh && *sh) {
+                log_text(PMLOG_LEVEL_INFO, "LSRegister RECOVERED via anonymous NULL");
+                return 1;
+            }
+            log_ls_error("LSRegister(anon_fallback)", "(null)", err);
+            safe_clear_lserror(err);
+        }
+    }
+    if (sh) *sh = alloc_fake_ls_handle();
+    log_text(PMLOG_LEVEL_ERROR, "LSRegister returning sentinel fake handle");
+    return 1;
+}
+
+EXPORT int LSRegisterApplicationService(const char *name, const char *app_id, void **sh, void *err) {
+    typedef int (*fn_app_t)(const char *, const char *, void **, void *);
+    typedef int (*fn_reg_t)(const char *, void **, void *);
+    fn_app_t real_app = (fn_app_t)resolve_ls_sym("LSRegisterApplicationService", (void *)LSRegisterApplicationService);
+    fn_reg_t real_reg = (fn_reg_t)resolve_ls_sym("LSRegister", (void *)LSRegister);
+
+    if (real_app) {
+        if (real_app(name, app_id, sh, err) && sh && *sh) {
+            log_text(PMLOG_LEVEL_INFO, "LSRegisterApplicationService ok");
+            return 1;
+        }
+        log_ls_error("LSRegisterApplicationService", name ? name : (app_id ? app_id : "(null)"), err);
+        safe_clear_lserror(err);
+    }
+    if (real_reg) {
+        if (app_id && real_reg(app_id, sh, err) && sh && *sh) {
+            log_text(PMLOG_LEVEL_INFO, "LSRegisterApplicationService RECOVERED via LSRegister(app_id)");
+            return 1;
+        }
+        safe_clear_lserror(err);
+        if (real_reg(0, sh, err) && sh && *sh) {
+            log_text(PMLOG_LEVEL_INFO, "LSRegisterApplicationService RECOVERED via anonymous LSRegister(NULL)");
+            return 1;
+        }
+        log_ls_error("LSRegisterApplicationService(anon_fallback)", "(null)", err);
+        safe_clear_lserror(err);
+    }
+    if (sh) *sh = alloc_fake_ls_handle();
+    log_text(PMLOG_LEVEL_ERROR, "LSRegisterApplicationService returning sentinel fake handle");
+    return 1;
+}
+
+EXPORT int LSRegisterPubPriv(const char *name, void **sh, int public_bus, void *err) {
+    typedef int (*fn_pp_t)(const char *, void **, int, void *);
+    fn_pp_t real_pp = (fn_pp_t)resolve_ls_sym("LSRegisterPubPriv", (void *)LSRegisterPubPriv);
+    if (real_pp) {
+        if (real_pp(name, sh, public_bus, err) && sh && *sh) {
+            return 1;
+        }
+        log_ls_error("LSRegisterPubPriv", name ? name : "(null)", err);
+        safe_clear_lserror(err);
+    }
+    return LSRegister(name, sh, err);
+}
+
+EXPORT int LSUnregister(void *sh, void *err) {
+    typedef int (*fn_t)(void *, void *);
+    clear_ls_slots_for_handle(sh);
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSUnregister", (void *)LSUnregister);
+    if (real_fn) {
+        if (real_fn(sh, err)) return 1;
+        log_ls_error("LSUnregister", "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+EXPORT int LSGmainAttach(void *sh, void *main_loop, void *err) {
+    typedef int (*fn_t)(void *, void *, void *);
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSGmainAttach", (void *)LSGmainAttach);
+    if (real_fn) {
+        if (real_fn(sh, main_loop, err)) return 1;
+        log_ls_error("LSGmainAttach", "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+EXPORT int LSGmainContextAttach(void *sh, void *gmain_ctx, void *err) {
+    typedef int (*fn_t)(void *, void *, void *);
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSGmainContextAttach", (void *)LSGmainContextAttach);
+    if (real_fn) {
+        if (real_fn(sh, gmain_ctx, err)) return 1;
+        log_ls_error("LSGmainContextAttach", "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+EXPORT int LSRegisterCategory(
+    void *sh,
+    const char *category,
+    void *methods,
+    void *signals,
+    void *properties,
+    void *err
+) {
+    typedef int (*fn_t)(void *, const char *, void *, void *, void *, void *);
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSRegisterCategory", (void *)LSRegisterCategory);
+    if (real_fn) {
+        if (real_fn(sh, category, methods, signals, properties, err)) return 1;
+        log_ls_error("LSRegisterCategory", category ? category : "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+EXPORT int LSCategorySetData(void *sh, const char *category, void *user_data, void *err) {
+    typedef int (*fn_t)(void *, const char *, void *, void *);
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSCategorySetData", (void *)LSCategorySetData);
+    if (real_fn) {
+        if (real_fn(sh, category, user_data, err)) return 1;
+        log_ls_error("LSCategorySetData", category ? category : "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+EXPORT int LSMessageRespond(void *msg, const char *reply_payload, void *err) {
+    typedef int (*fn_t)(void *, const char *, void *);
+    if (!msg) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSMessageRespond", (void *)LSMessageRespond);
+    if (real_fn) {
+        if (real_fn(msg, reply_payload, err)) return 1;
+        log_ls_error("LSMessageRespond", "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+EXPORT int LSCallCancel(void *sh, uint32_t token, void *err) {
+    typedef int (*fn_t)(void *, uint32_t, void *);
+    clear_ls_slots_for_token(sh, token);
+    if (!sh || is_fake_ls_handle(sh) || token == 0U) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSCallCancel", (void *)LSCallCancel);
+    if (real_fn) {
+        if (real_fn(sh, token, err)) return 1;
+        log_ls_error("LSCallCancel", "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+EXPORT int LSCallCancelNotificationAdd(void *sh, void *cb, void *ctx, void *err) {
+    typedef int (*fn_t)(void *, void *, void *, void *);
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSCallCancelNotificationAdd", (void *)LSCallCancelNotificationAdd);
+    if (real_fn) {
+        if (real_fn(sh, cb, ctx, err)) return 1;
+        log_ls_error("LSCallCancelNotificationAdd", "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+EXPORT int LSCallCancelNotificationRemove(void *sh, void *cb, void *ctx, void *err) {
+    typedef int (*fn_t)(void *, void *, void *, void *);
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 1;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSCallCancelNotificationRemove", (void *)LSCallCancelNotificationRemove);
+    if (real_fn) {
+        if (real_fn(sh, cb, ctx, err)) return 1;
+        log_ls_error("LSCallCancelNotificationRemove", "", err);
+        safe_clear_lserror(err);
+    }
+    return 1;
+}
+
+static void log_ls_call_start(const char *fn_name, const char *uri, const char *payload) {
+    if (g_ls_call_logs >= 200U) return;
+    ++g_ls_call_logs;
+    struct log_buf b;
+    lbuf_init(&b);
+    lbuf_str(&b, "LS2 ");
+    lbuf_str(&b, fn_name);
+    lbuf_str(&b, " uri=");
+    lbuf_str_trunc(&b, uri ? uri : "(null)", 120);
+    lbuf_str(&b, " payload=");
+    lbuf_str_trunc(&b, payload ? payload : "(null)", 120);
+    log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+}
+
+EXPORT int LSCallFromApplication(
+    void *sh,
+    const char *uri,
+    const char *payload,
+    const char *app_id,
+    compat_ls_cb_t cb,
+    void *ctx,
+    uint32_t *ret_token,
+    void *err
+) {
+    typedef int (*fn_t)(void *, const char *, const char *, const char *, compat_ls_cb_t, void *, uint32_t *, void *);
+    log_ls_call_start("LSCallFromApplication", uri, payload);
+    if (ret_token) *ret_token = 0U;
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 0;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSCallFromApplication", (void *)LSCallFromApplication);
+    if (!real_fn) {
+        safe_clear_lserror(err);
+        return 0;
+    }
+    uint32_t seq = 0;
+    struct compat_ls_slot *slot = cb ? alloc_ls_slot(sh, uri, payload, cb, ctx, 0, &seq) : 0;
+    int ok = real_fn(
+        sh, uri, payload, app_id,
+        slot ? compat_ls_reply_filter : cb,
+        slot ? (void *)slot : ctx,
+        ret_token, err
+    );
+    finish_ls_slot(slot, seq, sh, ok, ret_token);
+    if (!ok) log_ls_error("LSCallFromApplication", uri, err);
+    return ok;
+}
+
+EXPORT int LSCall(
+    void *sh,
+    const char *uri,
+    const char *payload,
+    compat_ls_cb_t cb,
+    void *ctx,
+    uint32_t *ret_token,
+    void *err
+) {
+    typedef int (*fn_t)(void *, const char *, const char *, compat_ls_cb_t, void *, uint32_t *, void *);
+    log_ls_call_start("LSCall", uri, payload);
+    if (ret_token) *ret_token = 0U;
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 0;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSCall", (void *)LSCall);
+    if (!real_fn) {
+        safe_clear_lserror(err);
+        return 0;
+    }
+    uint32_t seq = 0;
+    struct compat_ls_slot *slot = cb ? alloc_ls_slot(sh, uri, payload, cb, ctx, 0, &seq) : 0;
+    int ok = real_fn(
+        sh, uri, payload,
+        slot ? compat_ls_reply_filter : cb,
+        slot ? (void *)slot : ctx,
+        ret_token, err
+    );
+    finish_ls_slot(slot, seq, sh, ok, ret_token);
+    if (!ok) log_ls_error("LSCall", uri, err);
+    return ok;
+}
+
+EXPORT int LSCallOneReply(
+    void *sh,
+    const char *uri,
+    const char *payload,
+    compat_ls_cb_t cb,
+    void *ctx,
+    uint32_t *ret_token,
+    void *err
+) {
+    typedef int (*fn_t)(void *, const char *, const char *, compat_ls_cb_t, void *, uint32_t *, void *);
+    log_ls_call_start("LSCallOneReply", uri, payload);
+    if (ret_token) *ret_token = 0U;
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 0;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSCallOneReply", (void *)LSCallOneReply);
+    if (!real_fn) {
+        safe_clear_lserror(err);
+        return 0;
+    }
+    uint32_t seq = 0;
+    struct compat_ls_slot *slot = cb ? alloc_ls_slot(sh, uri, payload, cb, ctx, 1, &seq) : 0;
+    int ok = real_fn(
+        sh, uri, payload,
+        slot ? compat_ls_reply_filter : cb,
+        slot ? (void *)slot : ctx,
+        ret_token, err
+    );
+    finish_ls_slot(slot, seq, sh, ok, ret_token);
+    if (!ok) log_ls_error("LSCallOneReply", uri, err);
+    return ok;
+}
+
+EXPORT int LSCallFromApplicationOneReply(
+    void *sh,
+    const char *uri,
+    const char *payload,
+    const char *app_id,
+    compat_ls_cb_t cb,
+    void *ctx,
+    uint32_t *ret_token,
+    void *err
+) {
+    typedef int (*fn_t)(void *, const char *, const char *, const char *, compat_ls_cb_t, void *, uint32_t *, void *);
+    log_ls_call_start("LSCallFromApplicationOneReply", uri, payload);
+    if (ret_token) *ret_token = 0U;
+    if (!sh || is_fake_ls_handle(sh)) {
+        safe_clear_lserror(err);
+        return 0;
+    }
+    fn_t real_fn = (fn_t)resolve_ls_sym("LSCallFromApplicationOneReply", (void *)LSCallFromApplicationOneReply);
+    if (!real_fn) {
+        safe_clear_lserror(err);
+        return 0;
+    }
+    uint32_t seq = 0;
+    struct compat_ls_slot *slot = cb ? alloc_ls_slot(sh, uri, payload, cb, ctx, 1, &seq) : 0;
+    int ok = real_fn(
+        sh, uri, payload, app_id,
+        slot ? compat_ls_reply_filter : cb,
+        slot ? (void *)slot : ctx,
+        ret_token, err
+    );
+    finish_ls_slot(slot, seq, sh, ok, ret_token);
+    if (!ok) log_ls_error("LSCallFromApplicationOneReply", uri, err);
+    return ok;
 }
 
 /* ============================================================================
@@ -1260,6 +3064,7 @@ c_out.write_text(c_code)
 PYEOF
 
 "$CLANG_BIN" -target armv7a-linux-gnueabi -mfloat-abi=softfp -march=armv7-a \
+  -Wall -Wextra -Werror=implicit-function-declaration -Werror=return-type -Wno-unused-parameter \
   -fuse-ld=lld -shared -fPIC -O2 -nostdlib -fno-stack-protector \
   -Wl,-soname,libwebos_compat32.so \
   "$STAGE_DIR/webos_compat32.c" \
@@ -1578,6 +3383,7 @@ PYEOF
 
 rm -rf "$APP_DIR/appdata/"* "$APP_DIR/appdata/".* 2>/dev/null || true
 chmod 0777 "$APP_DIR/appdata" 2>/dev/null || true
+chmod 0755 "$APP_DIR/lib/"*.so* 2>/dev/null || true
 
 echo "=== [7/7] Baue kompatibles Paket (SysV ar + POSIX ustar): com.edde746.plezy_${APP_VER}_arm_webos6-24.ipk ==="
 mkdir -p "$STAGE_DIR/ctrl_extract"
@@ -1669,7 +3475,7 @@ for cur_dir, dirnames, filenames in os.walk(usr_root):
         if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
             raise RuntimeError(f"unsupported non-regular entry in package data: {fpath}")
         rel_file = fpath.relative_to(data_root).as_posix()
-        is_exec = (st.st_mode & 0o111) != 0 or rel_file.endswith("/plezy")
+        is_exec = (st.st_mode & 0o111) != 0 or rel_file.endswith("/plezy") or ("/lib/" in rel_file and ".so" in fname)
         f_mode = 0o755 if is_exec else 0o644
         file_bytes += st.st_size
         entries.append((rel_file, False, fpath, f_mode, st.st_size))
@@ -1796,6 +3602,9 @@ with tarfile.open(fileobj=io.BytesIO(gzip.decompress(parsed["data.tar.gz"])), mo
     ):
         assert required in names, f"missing {required} in data.tar.gz"
     assert (names["usr/palm/applications/com.edde746.plezy/plezy"].mode & 0o777) == 0o755
+    for mname, m in names.items():
+        if mname.startswith("usr/palm/applications/com.edde746.plezy/lib/") and ".so" in Path(mname).name and not m.isdir():
+            assert (m.mode & 0o777) == 0o755, f"unexpected mode {oct(m.mode)} on {mname}"
 
 print(
     f"Verified IPK {out_path.name}: {len(ipk_bytes)} bytes, "
