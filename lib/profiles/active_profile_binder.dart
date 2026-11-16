@@ -91,7 +91,9 @@ class ActiveProfileBinder {
     required this.pinPrompt,
     this.shouldDeferInitialBind,
     PlexAuthService? plexAuth,
-  }) : _plexAuth = plexAuth;
+  }) : _plexAuth = plexAuth {
+    serverManager.plexServerListRefresher = _refreshPlexServerList;
+  }
 
   final ActiveProfileProvider activeProfile;
   final ConnectionRegistry connections;
