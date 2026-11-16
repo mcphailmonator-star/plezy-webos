@@ -62,7 +62,7 @@ It unpacks the unpatched IPK and produces `com.edde746.plezy_<ver>_arm_webos6-24
 4. Sets `plezy`'s interpreter to `/lib/ld-linux.so.3` (the unpatched build uses `/usr/lib/ld-linux.so.3`), sets `RPATH` (`$ORIGIN/lib:$ORIGIN` on `plezy`, `$ORIGIN` on libraries), and prepends `libwebos_compat32.so`, `libdl.so.2`, `libpthread.so.0`, and `librt.so.1` ahead of existing `DT_NEEDED` entries (skipping `libapp.so`).
 5. Patches `libflutter_webos_media.so` so `WebOSSurface` binds `wl_webos_shell` version 1 instead of 2 by replacing the exact machine-code sequence (aborting with an error if the signature is not found).
 6. Cleans ELF `.gnu.version` and `.gnu.version_r` entries on each binary (`plezy` and bundled `.so` files except `libwebos_compat32.so` and `libapp.so`): remaps `GLIBC_2.29`–`2.38` versions of pre-existing symbols to `GLIBC_2.4`, unversions shimmed/weak/`GLIBC_2.12` symbols, drops unused `GLIBC >= 2.29` `Verneed` records, updates `DT_VERNEEDNUM` and section `sh_info`, verifies zero disallowed `GLIBC >= 2.29` symbol references remain, and lowers `.note.ABI-tag` kernel versions above `3.2.0` to `3.2.0`.
-7. Repacks `data.tar.gz` and `control.tar.gz` in POSIX `ustar` format, then writes the `.ipk` archive with `ar r`.
+7. Updates `Installed-Size` in `control` to match the unpacked bytes (`file_bytes + dir_count * 4096`), repacks `control.tar.gz` (`control` only) and `data.tar.gz` (`usr/...` without `./` prefixes) in POSIX `ustar` format with a safe past timestamp (`2024-01-01 UTC`), writes a System V `ar` archive (no trailing `/`, non-zero mtime, `100644`), and self-verifies the output `.ipk`.
 
 ## 5. What `libwebos_compat32.so` provides
 

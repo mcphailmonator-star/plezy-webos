@@ -40,7 +40,14 @@ def read_tar_file(blob: bytes, wanted) -> bytes:
     raise ValueError("file not found in package")
 
 
-def manifest_for(ipk: Path, icon_uri: str, source_url: str, ipk_url: str) -> dict:
+def manifest_for(
+    ipk: Path,
+    icon_uri: str,
+    source_url: str,
+    ipk_url: str,
+    title: str,
+    default_desc: str,
+) -> dict:
     data = ipk.read_bytes()
     members = ar_members(data)
     control = read_tar_file(members["control.tar.gz"], lambda n: n == "control").decode()
@@ -52,7 +59,7 @@ def manifest_for(ipk: Path, icon_uri: str, source_url: str, ipk_url: str) -> dic
         "id": appinfo["id"],
         "version": appinfo["version"],
         "type": appinfo["type"],
-        "title": appinfo["title"],
+        "title": title,
         "iconUri": icon_uri,
         "sourceUrl": source_url,
         "rootRequired": False,
@@ -60,9 +67,8 @@ def manifest_for(ipk: Path, icon_uri: str, source_url: str, ipk_url: str) -> dic
         "ipkHash": {"sha256": hashlib.sha256(data).hexdigest()},
         "ipkSize": len(data),
         "installedSize": int(installed.group(1)) if installed else None,
+        "appDescription": appinfo.get("appDescription") or default_desc,
     }
-    if appinfo.get("appDescription"):
-        manifest["appDescription"] = appinfo["appDescription"]
     return manifest
 
 
@@ -72,6 +78,11 @@ def main() -> int:
     parser.add_argument("--repo", required=True, help="GitHub owner/name hosting the releases")
     parser.add_argument("--tag", required=True, help="release tag the IPKs are attached to")
     parser.add_argument("--prefix", default="plezy", help="file name prefix for the outputs")
+    parser.add_argument(
+        "--manifest-base-url",
+        default="",
+        help="base URL where manifest JSON files are served (defaults to releases/latest/download)",
+    )
     args = parser.parse_args()
 
     ipks = sorted(args.dist.glob("*_arm_*.ipk"))
@@ -80,22 +91,41 @@ def main() -> int:
         return 1
 
     base = f"https://github.com/{args.repo}"
+    manifest_base = args.manifest_base_url.rstrip("/") if args.manifest_base_url else f"{base}/releases/latest/download"
     icon_uri = f"https://raw.githubusercontent.com/{args.repo}/{args.tag}/webos/meta/icon.png"
     for ipk in ipks:
         variant = ipk.stem.rsplit("_arm_", 1)[1]
-        manifest = manifest_for(ipk, icon_uri, base,
-                                f"{base}/releases/download/{args.tag}/{ipk.name}")
+        variant_label = variant.replace("webos", "webOS ")
+        title = f"Plezy ({variant_label})"
+        if variant == "webos6-24":
+            short_desc = "Plex, Jellyfin & Emby client (webOS 6-24 / Re:New build)"
+            full_desc = (
+                "Plex, Jellyfin, and Emby client for pre-2025 LG webOS TVs "
+                "(webOS 6.x through webOS 24, plus Re:New-updated TVs)."
+            )
+        else:
+            short_desc = f"Plex, Jellyfin & Emby client ({variant_label} build)"
+            full_desc = (
+                f"Plex, Jellyfin, and Emby client for factory {variant_label} LG TVs (2025+ models)."
+            )
+        manifest = manifest_for(
+            ipk,
+            icon_uri,
+            base,
+            f"{base}/releases/download/{args.tag}/{ipk.name}",
+            title,
+            full_desc,
+        )
         manifest_name = f"{args.prefix}-{variant}.manifest.json"
-        title = f"{manifest['title']} ({variant.replace('webos', 'webOS ')})"
         # The manifest is embedded as well as linked: Glasshouse only lists entries carrying it inline.
         index = {
             "paging": {"page": 1, "count": 1, "maxPage": 1, "itemsTotal": 1},
             "packages": [{
                 "id": manifest["id"],
                 "title": title,
-                "shortDescription": f"Plex client for webOS TVs, {variant.replace('webos', 'webOS ')} build",
+                "shortDescription": short_desc,
                 "iconUri": icon_uri,
-                "manifestUrl": f"{base}/releases/latest/download/{manifest_name}",
+                "manifestUrl": f"{manifest_base}/{manifest_name}",
                 "manifest": manifest,
             }],
         }

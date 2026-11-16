@@ -1579,20 +1579,230 @@ PYEOF
 rm -rf "$APP_DIR/appdata/"* "$APP_DIR/appdata/".* 2>/dev/null || true
 chmod 0777 "$APP_DIR/appdata" 2>/dev/null || true
 
-echo "=== [7/7] Baue kompatibles Paket (POSIX ustar): com.edde746.plezy_${APP_VER}_arm_webos6-24.ipk ==="
-cd "$STAGE_DIR/data_extract"
-tar --format=ustar --numeric-owner --owner=0 --group=0 -czf "$STAGE_DIR/ipk_extract/data.tar.gz" ./usr
-
+echo "=== [7/7] Baue kompatibles Paket (SysV ar + POSIX ustar): com.edde746.plezy_${APP_VER}_arm_webos6-24.ipk ==="
 mkdir -p "$STAGE_DIR/ctrl_extract"
-cd "$STAGE_DIR/ctrl_extract"
-tar -xzf "$STAGE_DIR/ipk_extract/control.tar.gz"
-tar --format=ustar --numeric-owner --owner=0 --group=0 -czf "$STAGE_DIR/ipk_extract/control.tar.gz" .
+tar -xzf "$STAGE_DIR/ipk_extract/control.tar.gz" -C "$STAGE_DIR/ctrl_extract"
 
 OUT_COMPAT_PATH="$OUT_DIR/com.edde746.plezy_${APP_VER}_arm_webos6-24.ipk"
-
-cd "$STAGE_DIR/ipk_extract"
 rm -f "$OUT_COMPAT_PATH"
-ar r "$OUT_COMPAT_PATH" debian-binary control.tar.gz data.tar.gz
+
+python3 - "$STAGE_DIR" "$OUT_COMPAT_PATH" << 'PYEOF'
+import gzip
+import io
+import os
+import re
+import stat
+import sys
+import tarfile
+from pathlib import Path
+
+stage_dir = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+data_root = stage_dir / "data_extract"
+ctrl_path = stage_dir / "ctrl_extract" / "control"
+ipk_extract = stage_dir / "ipk_extract"
+
+# Fixed non-zero timestamp safely in the past (2024-01-01 00:00:00 UTC) so
+# GNU tar in webOS pkgverifier never warns about epoch-zero OR future mtimes
+# if a TV's RTC/NTP clock is behind the CI runner clock.
+ipk_mtime = int(os.environ.get("IPK_MTIME", "1704067200"))
+if ipk_mtime <= 0:
+    raise RuntimeError(f"IPK_MTIME must be > 0, got {ipk_mtime}")
+
+usr_root = data_root / "usr"
+if not usr_root.is_dir():
+    raise RuntimeError(f"missing usr/ directory under {data_root}")
+
+
+def gzip_unix_bytes(raw_tar: bytes) -> bytes:
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0, compresslevel=6) as gz:
+        gz.write(raw_tar)
+    out = bytearray(buf.getvalue())
+    out[9] = 3  # Unix OS byte, matching gzip -n / ares-package
+    return bytes(out)
+
+
+def add_ustar_dir(tf: tarfile.TarFile, arcname: str, mode: int) -> None:
+    ti = tarfile.TarInfo(arcname)
+    ti.type = tarfile.DIRTYPE
+    ti.mode = mode
+    ti.uid = 0
+    ti.gid = 0
+    ti.uname = "root"
+    ti.gname = "root"
+    ti.mtime = ipk_mtime
+    ti.tobuf(tarfile.USTAR_FORMAT)
+    tf.addfile(ti)
+
+
+def add_ustar_file(tf: tarfile.TarFile, arcname: str, payload: bytes, mode: int) -> None:
+    ti = tarfile.TarInfo(arcname)
+    ti.type = tarfile.REGTYPE
+    ti.mode = mode
+    ti.uid = 0
+    ti.gid = 0
+    ti.uname = "root"
+    ti.gname = "root"
+    ti.mtime = ipk_mtime
+    ti.size = len(payload)
+    ti.tobuf(tarfile.USTAR_FORMAT)
+    tf.addfile(ti, io.BytesIO(payload))
+
+
+# Walk usr/ in deterministic directory-first order matching ares-package and compute Installed-Size.
+file_bytes = 0
+dir_count = 1  # count root '.' alongside every directory, matching ares-package getFileSize
+entries = []  # (arcname, is_dir, src_path_or_none, mode, size)
+
+for cur_dir, dirnames, filenames in os.walk(usr_root):
+    dirnames.sort()
+    filenames.sort()
+    cur_path = Path(cur_dir)
+    rel_dir = cur_path.relative_to(data_root).as_posix()
+    dir_count += 1
+    d_mode = 0o777 if rel_dir.endswith("/appdata") else 0o755
+    entries.append((rel_dir, True, None, d_mode, 0))
+    for fname in filenames:
+        fpath = cur_path / fname
+        st = fpath.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise RuntimeError(f"unsupported non-regular entry in package data: {fpath}")
+        rel_file = fpath.relative_to(data_root).as_posix()
+        is_exec = (st.st_mode & 0o111) != 0 or rel_file.endswith("/plezy")
+        f_mode = 0o755 if is_exec else 0o644
+        file_bytes += st.st_size
+        entries.append((rel_file, False, fpath, f_mode, st.st_size))
+
+installed_size = file_bytes + dir_count * 4096
+
+ctrl_text = ctrl_path.read_text(encoding="utf-8")
+if re.search(r"^Installed-Size:\s*\d+\s*$", ctrl_text, re.MULTILINE):
+    ctrl_text = re.sub(
+        r"^Installed-Size:\s*\d+\s*$",
+        f"Installed-Size: {installed_size}",
+        ctrl_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+elif re.search(r"^Architecture:.*$", ctrl_text, re.MULTILINE):
+    ctrl_text = re.sub(
+        r"^(Architecture:.*)$",
+        rf"\1\nInstalled-Size: {installed_size}",
+        ctrl_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+else:
+    ctrl_text = ctrl_text.rstrip("\n") + f"\nInstalled-Size: {installed_size}\n"
+if not ctrl_text.endswith("\n"):
+    ctrl_text += "\n"
+ctrl_bytes = ctrl_text.encode("utf-8")
+ctrl_path.write_bytes(ctrl_bytes)
+
+ctrl_tar_buf = io.BytesIO()
+with tarfile.open(fileobj=ctrl_tar_buf, mode="w:", format=tarfile.USTAR_FORMAT) as tf:
+    add_ustar_file(tf, "control", ctrl_bytes, 0o644)
+ctrl_tar_raw = ctrl_tar_buf.getvalue()
+assert ctrl_tar_raw[257:263] == b"ustar\x00", "control tar is not POSIX ustar"
+control_tgz = gzip_unix_bytes(ctrl_tar_raw)
+(ipk_extract / "control.tar.gz").write_bytes(control_tgz)
+
+data_tar_buf = io.BytesIO()
+with tarfile.open(fileobj=data_tar_buf, mode="w:", format=tarfile.USTAR_FORMAT) as tf:
+    for arcname, is_dir, fpath, mode, _size in entries:
+        if is_dir:
+            add_ustar_dir(tf, arcname, mode)
+        else:
+            add_ustar_file(tf, arcname, fpath.read_bytes(), mode)
+data_tar_raw = data_tar_buf.getvalue()
+assert data_tar_raw[257:263] == b"ustar\x00", "data tar is not POSIX ustar"
+data_tgz = gzip_unix_bytes(data_tar_raw)
+(ipk_extract / "data.tar.gz").write_bytes(data_tgz)
+
+debian_binary = b"2.0\n"
+(ipk_extract / "debian-binary").write_bytes(debian_binary)
+
+ar_chunks = [b"!<arch>\n"]
+for name, payload in (
+    ("debian-binary", debian_binary),
+    ("control.tar.gz", control_tgz),
+    ("data.tar.gz", data_tgz),
+):
+    hdr = (
+        name.encode("ascii").ljust(16)
+        + str(ipk_mtime).encode("ascii").ljust(12)
+        + b"0".ljust(6)
+        + b"0".ljust(6)
+        + b"100644".ljust(8)
+        + str(len(payload)).encode("ascii").ljust(10)
+        + b"`\n"
+    )
+    assert len(hdr) == 60
+    ar_chunks.append(hdr)
+    ar_chunks.append(payload)
+    if len(payload) % 2:
+        ar_chunks.append(b"\n")
+
+ipk_bytes = b"".join(ar_chunks)
+out_path.write_bytes(ipk_bytes)
+
+# Self-verify generated IPK structure against LG pkgverifier requirements.
+raw = out_path.read_bytes()
+assert raw[:8] == b"!<arch>\n"
+pos = 8
+parsed = {}
+order = []
+while pos < len(raw):
+    hdr = raw[pos:pos + 60]
+    assert len(hdr) == 60 and hdr[58:60] == b"`\n"
+    raw_name = hdr[:16].decode("ascii").rstrip(" ")
+    assert "/" not in raw_name, f"unexpected slash in ar member name: {raw_name!r}"
+    ar_date = int(hdr[16:28].decode("ascii").strip())
+    ar_mode = hdr[40:48].decode("ascii").strip()
+    ar_size = int(hdr[48:58].decode("ascii").strip())
+    assert ar_date == ipk_mtime and ar_date > 0
+    assert ar_mode == "100644", f"unexpected ar mode {ar_mode!r} on {raw_name}"
+    order.append(raw_name)
+    parsed[raw_name] = raw[pos + 60:pos + 60 + ar_size]
+    pos += 60 + ar_size + (ar_size % 2)
+assert pos == len(raw)
+assert order == ["debian-binary", "control.tar.gz", "data.tar.gz"], f"unexpected ar order {order}"
+assert parsed["debian-binary"] == b"2.0\n"
+
+with tarfile.open(fileobj=io.BytesIO(gzip.decompress(parsed["control.tar.gz"])), mode="r:") as tf:
+    cm = tf.getmembers()
+    assert [m.name for m in cm] == ["control"], f"unexpected control tar entries {[m.name for m in cm]}"
+    assert cm[0].mtime == ipk_mtime and not cm[0].pax_headers
+    ctext = tf.extractfile(cm[0]).read().decode("utf-8")
+    m_size = re.search(r"^Installed-Size:\s*(\d+)$", ctext, re.MULTILINE)
+    assert m_size and int(m_size.group(1)) == installed_size and installed_size >= file_bytes
+
+with tarfile.open(fileobj=io.BytesIO(gzip.decompress(parsed["data.tar.gz"])), mode="r:") as tf:
+    dm = tf.getmembers()
+    names = {m.name: m for m in dm}
+    for m in dm:
+        assert m.name.startswith("usr"), f"bad tar path {m.name!r}"
+        assert not m.pax_headers, f"PAX header present on {m.name!r}"
+        assert 0 < m.mtime <= ipk_mtime
+    for required in (
+        "usr/palm/applications/com.edde746.plezy/appinfo.json",
+        "usr/palm/packages/com.edde746.plezy/packageinfo.json",
+        "usr/palm/applications/com.edde746.plezy/plezy",
+        "usr/palm/applications/com.edde746.plezy/lib/libwebos_compat32.so",
+        "usr/palm/applications/com.edde746.plezy/lib/libsqlite3_dart.so",
+        "usr/palm/applications/com.edde746.plezy/lib/libstdc++.so.6",
+        "usr/palm/applications/com.edde746.plezy/data/flutter_assets/NativeAssetsManifest.json",
+    ):
+        assert required in names, f"missing {required} in data.tar.gz"
+    assert (names["usr/palm/applications/com.edde746.plezy/plezy"].mode & 0o777) == 0o755
+
+print(
+    f"Verified IPK {out_path.name}: {len(ipk_bytes)} bytes, "
+    f"Installed-Size={installed_size} (files={file_bytes}, dirs={dir_count}), "
+    f"entries={len(dm)}, mtime={ipk_mtime}"
+)
+PYEOF
 
 echo ""
 echo "=== FERTIGE PAKETE IN $OUT_DIR ==="

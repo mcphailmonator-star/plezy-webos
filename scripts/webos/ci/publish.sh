@@ -3,33 +3,50 @@
 # repository file for each. Needs GH_TOKEN with contents:write on <repo>.
 # Usage: publish.sh <owner/name> <tag>
 set -euo pipefail
-ORIG_REPO="$1"
-ORIG_TAG="$2"
-
 REPO="$1"
 TAG="$2"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DIST="$REPO_ROOT/dist"
 
-python3 "$REPO_ROOT/scripts/webos/ci/make_homebrew_repo.py" "$DIST" --repo "$REPO" --tag "$TAG"
+RAW_REPO_BASE="https://raw.githubusercontent.com/$REPO/hb-repo"
+LATEST_RELEASE_BASE="https://github.com/$REPO/releases/latest/download"
 
-latest="https://github.com/$REPO/releases/latest/download"
-notes="Both packages contain 32-bit ARM binaries and share the app id com.edde746.plezy; install only the one matching your TV.
+python3 "$REPO_ROOT/scripts/webos/ci/make_homebrew_repo.py" "$DIST" \
+  --repo "$REPO" --tag "$TAG" --manifest-base-url "$RAW_REPO_BASE"
 
-Homebrew Channel: add the repository URL for your TV in the Homebrew Channel settings. Each repository lists one package and follows the latest release.
+# Publish repository & manifest JSON files onto the dedicated hb-repo branch so
+# raw.githubusercontent.com serves them directly with HTTP 200 (no 302 redirects)
+# and Access-Control-Allow-Origin: * for Homebrew Channel / Glasshouse.
+PUSH_TOKEN="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+if [ -n "$PUSH_TOKEN" ]; then
+  HB_TMP="$(mktemp -d)"
+  git -C "$HB_TMP" init
+  git -C "$HB_TMP" config user.name "github-actions[bot]"
+  git -C "$HB_TMP" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+  git -C "$HB_TMP" remote add origin "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git"
+  if git -C "$HB_TMP" fetch --depth=1 origin hb-repo 2>/dev/null; then
+    git -C "$HB_TMP" checkout -B hb-repo FETCH_HEAD
+  else
+    git -C "$HB_TMP" checkout --orphan hb-repo
+  fi
+  cp -f "$DIST"/*.repo.json "$DIST"/*.manifest.json "$HB_TMP"/
+  cat << EOF > "$HB_TMP/README.md"
+# Plezy Homebrew Channel Repositories
 
-| TV | Package | Homebrew Channel repository | Manifest |
-| --- | --- | --- | --- |
-| Factory webOS 25 / 26 hardware (2025+ models) | \`com.edde746.plezy_*_arm_webos25-26.ipk\` | $latest/plezy-webos25-26.repo.json | $latest/plezy-webos25-26.manifest.json |
-| Pre-2025 TVs (webOS 6.x through webOS 24, and Re:New TVs on webOS 25 / 26) | \`com.edde746.plezy_*_arm_webos6-24.ipk\` | $latest/plezy-webos6-24.repo.json | $latest/plezy-webos6-24.manifest.json |
+Auto-updated on release \`${TAG}\`.
 
-The \`webos6-24\` build bundles \`libwebos_compat32.so\`, NDK \`libstdc++.so.6\`, and \`libsqlite3_dart.so\` so it links cleanly back to \`webOS 6.x\` (\`glibc 2.28+\`).
-
-The manifests carry the SHA-256 of each IPK, which the Homebrew Channel checks before installing."
-
-gh release delete "$ORIG_TAG" --repo "$ORIG_REPO" --yes 2>/dev/null || true
-gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "$notes" \
-  "$DIST"/*.ipk "$DIST"/*.manifest.json "$DIST"/*.repo.json
+- **Pre-2025 TVs (webOS 6.x–24 and Re:New 25/26):** \`${RAW_REPO_BASE}/plezy-webos6-24.repo.json\`
+- **Factory 2025/2026 TVs (webOS 25/26):** \`${RAW_REPO_BASE}/plezy-webos25-26.repo.json\`
+EOF
+  git -C "$HB_TMP" add *.repo.json *.manifest.json README.md
+  if ! git -C "$HB_TMP" diff --cached --quiet; then
+    git -C "$HB_TMP" commit -m "chore(hb-repo): publish ${TAG} Homebrew manifests"
+    git -C "$HB_TMP" push origin HEAD:refs/heads/hb-repo
+  fi
+  rm -rf "$HB_TMP"
+else
+  echo "WARNING: no GH_TOKEN available; skipping hb-repo branch update" >&2
+fi
 
 NOTES_TMP="$(mktemp)"
 cat << NOTES_EOF > "$NOTES_TMP"
@@ -40,20 +57,25 @@ Native 32-bit ARM (\`armv7l\`) packages of Plezy for LG webOS TVs. Both builds s
 Which package your TV requires depends primarily on the **hardware release year** of the television rather than the displayed webOS version number alone. When 2022–2024 TVs receive webOS 25 or webOS 26 through LG's *webOS Re:New* program, the system interface is updated, but the underlying C runtime (\`glibc 2.31–2.35\`) and Wayland compositor protocol (\`wl_webos_shell\` v1) remain on the pre-2025 baseline rather than upgrading to the \`glibc 2.38\` and \`wl_webos_shell\` v2 stack used on factory-built 2025/2026 models.
 
 * **\`webos25-26\` (Standard Build):** Built for 2025 and 2026 LG TV models that shipped with webOS 25 or webOS 26 from the factory (\`glibc 2.38+\` / \`wl_webos_shell\` v2).
-* **\`webos6-24\` (Compatibility Build):** Bundles \`libwebos_compat32.so\` (\`glibc 2.28–2.38\` symbol & startup bridges, \`wl_webos_shell\` v1 protocol clamp & \`wl_proxy_marshal_flags\` fallback, and \`NDL_Media*\` shims), NDK \`libstdc++.so.6\` (\`6.0.32\`), and \`libsqlite3_dart.so\` (\`3.50.2\` via \`NativeAssetsManifest.json\`). Statically verified against firmware library dumps from **webOS 6.4.0 (\`glibc 2.28\`, 2021 models) through webOS 11.2.0**. Use this build on **all webOS 6.x–24 TVs** (including 2021 models such as \`75QNED90UPA\` / \`C1\` / \`G1\` and 2022–2024 models updated to webOS 25 or 26 via *Re:New*), or whenever the \`webos25-26\` package closes immediately on launch.
+* **\`webos6-24\` (Compatibility Build):** Bundles \`libwebos_compat32.so\` (\`glibc 2.28–2.38\` symbol & startup bridges, \`wl_webos_shell\` v1 protocol clamp & \`wl_proxy_marshal_flags\` fallback, and \`NDL_Media*\` shims), NDK \`libstdc++.so.6\` (\`6.0.32\`), and \`libsqlite3_dart.so\` (\`3.50.2\` via \`NativeAssetsManifest.json\`). Packed in System V \`ar\` + POSIX \`ustar\` format with accurate \`Installed-Size\`. Statically verified against firmware library dumps from **webOS 6.4.0 (\`glibc 2.28\`, 2021 models) through webOS 11.2.0**. Use this build on **all webOS 6.x–24 TVs** (including 2021 models such as \`75QNED90UPA\` / \`C1\` / \`G1\` and 2022–2024 models updated to webOS 25 or 26 via *Re:New*), or whenever the \`webos25-26\` package closes immediately on launch.
 
 ### Downloads & Homebrew Channel Repositories
 
-| Target Hardware / Runtime | IPK Package | Homebrew Repository URL (add in Homebrew Settings) | Direct Manifest URL |
-| :--- | :--- | :--- | :--- |
-| Factory webOS 25 / 26 hardware (2025+ models) | \`com.edde746.plezy_*_arm_webos25-26.ipk\` | https://github.com/${ORIG_REPO}/releases/latest/download/plezy-webos25-26.repo.json | https://github.com/${ORIG_REPO}/releases/latest/download/plezy-webos25-26.manifest.json |
-| Pre-2025 hardware (webOS 6.x–24 & Re:New-updated TVs) | \`com.edde746.plezy_*_arm_webos6-24.ipk\` | https://github.com/${ORIG_REPO}/releases/latest/download/plezy-webos6-24.repo.json | https://github.com/${ORIG_REPO}/releases/latest/download/plezy-webos6-24.manifest.json |
+| Target Hardware / Runtime | IPK Package | Homebrew Repository URL (add in Homebrew Settings) |
+| :--- | :--- | :--- |
+| Pre-2025 hardware (webOS 6.x–24 & Re:New-updated TVs) | \`com.edde746.plezy_*_arm_webos6-24.ipk\` | ${RAW_REPO_BASE}/plezy-webos6-24.repo.json |
+| Factory webOS 25 / 26 hardware (2025+ models) | \`com.edde746.plezy_*_arm_webos25-26.ipk\` | ${RAW_REPO_BASE}/plezy-webos25-26.repo.json |
+
+*(Release asset mirrors: ${LATEST_RELEASE_BASE}/plezy-webos6-24.repo.json and ${LATEST_RELEASE_BASE}/plezy-webos25-26.repo.json)*
 
 ### Installation & Automatic Updates
 
-* **webOS Homebrew Channel / Glasshouse:** Open the Homebrew Channel app on your TV, go to **Settings -> Repositories**, and add **only the \`.repo.json\` URL** matching your TV hardware from the table above (do not enter the \`.manifest.json\` URL there, and do not enable both repositories at the same time). The repository tracks the latest release and verifies the SHA-256 checksum from the manifest before installing.
+* **webOS Homebrew Channel / Glasshouse:** Open the Homebrew Channel app on your TV, go to **Settings -> Repositories -> Add repository**, and enter **only the \`.repo.json\` URL** matching your TV hardware from the table above (do **not** enter the GitHub repository page URL or a \`.manifest.json\` URL, and do not enable both variants at the same time). The manifest verifies the IPK's SHA-256 checksum before installing.
 * **Manual Installation:** Download the matching \`.ipk\` file from the release assets below and install it via **webOS Dev Manager** or the command line (\`ares-install <package>.ipk\`).
 NOTES_EOF
 
-gh release edit "$ORIG_TAG" --repo "$ORIG_REPO" --notes-file "$NOTES_TMP"
+gh release delete "$TAG" --repo "$REPO" --yes 2>/dev/null || true
+gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file "$NOTES_TMP" \
+  "$DIST"/*.ipk "$DIST"/*.manifest.json "$DIST"/*.repo.json
 rm -f "$NOTES_TMP"
+

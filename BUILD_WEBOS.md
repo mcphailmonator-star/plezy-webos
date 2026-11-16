@@ -22,7 +22,7 @@ All webOS plugins (`./webos_plugins/`) and patched third-party dependencies (`./
 **Rule of Thumb:**
 - If your TV shipped with **webOS 25 or webOS 26** from the factory (2025+ models), install **`com.edde746.plezy_<ver>_arm_webos25-26.ipk`**.
 - If your TV is a **2021–2024 model** (**webOS 6.x through webOS 24**, including 2022–2024 TVs upgraded to webOS 25/26 via *Re:New*), or if the `webos25-26` package fails to launch, install **`com.edde746.plezy_<ver>_arm_webos6-24.ipk`**.
-- Both packages are packed using **POSIX `ustar` format** (`--format=ustar`) and work with **webOS Dev Manager**, **ares-install**, **Homebrew Channel**, and **Glasshouse**.
+- Both packages are packed in System V `ar` + POSIX `ustar` format (`Installed-Size` updated, no `./` tar prefixes, safe past timestamps) and work with **webOS Dev Manager**, **ares-install**, **Homebrew Channel**, and **Glasshouse**.
 
 ---
 

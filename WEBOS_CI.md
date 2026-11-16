@@ -109,7 +109,7 @@ git tag v2.26.0-webos.2
 git push <remote> v2.26.0-webos.2
 ```
 
-`publish.sh` runs `make_homebrew_repo.py` on `dist/`, then creates the release with:
+`publish.sh` runs `make_homebrew_repo.py` on `dist/`, updates the `hb-repo` branch so `raw.githubusercontent.com` serves the `.repo.json` and `.manifest.json` files directly with HTTP 200 and `Access-Control-Allow-Origin: *`, and creates the release with:
 
 | Asset | Contents |
 | --- | --- |
@@ -118,29 +118,29 @@ git push <remote> v2.26.0-webos.2
 | `plezy-<variant>.manifest.json` | Homebrew Channel manifest per package |
 | `plezy-<variant>.repo.json` | Homebrew Channel repository per package |
 
-The release notes list the repository and manifest URL for each package, in the form:
+The release notes list the direct repository URL for each package, in the form:
 
+```text
+https://raw.githubusercontent.com/<owner>/<repo>/hb-repo/plezy-webos6-24.repo.json
 ```
-https://github.com/<owner>/<repo>/releases/latest/download/plezy-webos6-24.repo.json
-```
+
+*(The same JSON files are also attached as release assets under `releases/latest/download/`.)*
 
 Users add the repository URL for their TV in the Homebrew Channel or Glasshouse.
 
 ### Manifest and repository format
 
-The manifest has the fields `webosbrew-gen-manifest` writes: `id`, `version`, `type`, `title`,
-`iconUri`, `sourceUrl`, `rootRequired` (false), `ipkUrl`, `ipkHash.sha256`, `ipkSize` and
-`installedSize`, plus `appDescription` if `appinfo.json` has one.
+The manifest has the fields `webosbrew-gen-manifest` writes: `id`, `version`, `type`, `title` (`Plezy (webOS ...)`), `iconUri`, `sourceUrl`, `rootRequired` (false), `ipkUrl`, `ipkHash.sha256`, `ipkSize`, `installedSize`, and `appDescription`.
 
-- `id`, `version`, `type` and `title` come from the IPK's `appinfo.json`; `installedSize` is the
-  `Installed-Size` control field (bytes, as `ares-package` writes it).
+- `id`, `version`, and `type` come from the IPK's `appinfo.json`; `installedSize` is the updated
+  `Installed-Size` control field (`file_bytes + dir_count * 4096`, as `ares-package` writes it).
 - `ipkUrl` is the full URL of the IPK in the tagged release.
 - `iconUri` is `webos/meta/icon.png` at the tag, from `raw.githubusercontent.com`.
 
 Each repository file has a `paging` block and one package entry with `id`, `title`,
-`shortDescription`, `iconUri`, `manifestUrl` (via `releases/latest`) and the manifest embedded as
-`manifest`. Glasshouse lists only entries that carry the manifest inline; a link-only entry shows
-as 0 apps.
+`shortDescription`, `iconUri`, `manifestUrl` (pointing at `hb-repo` when `--manifest-base-url` is
+provided, else `releases/latest`), and the manifest embedded as `manifest`. Glasshouse lists only
+entries that carry the manifest inline; a link-only entry shows as 0 apps.
 
 Both IPKs share the app id `com.edde746.plezy`, and a repository lists an id once, so each
 package has its own repository.
