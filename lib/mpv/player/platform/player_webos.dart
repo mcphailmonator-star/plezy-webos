@@ -568,9 +568,14 @@ class PlayerWebos extends PlayerBase {
       }
 
       _posQueryInFlight = false;
+      var posTick = 0;
       _positionTimer = Timer.periodic(const Duration(milliseconds: 90), (_) async {
         final activeTex = _textureId;
         if (disposed || activeTex == null || _currentSourceId != sourceId || _posQueryInFlight) return;
+        // Subtitle cue timing needs the fast rate; plain playback only drives
+        // the progress bar, so poll ~3x less often to save CPU on the TV.
+        final subtitlesActive = !_subtitlesHidden && _selectedSubTrackId != null && _selectedSubTrackId != 'no';
+        if (!subtitlesActive && (posTick++ % 3) != 0) return;
         _posQueryInFlight = true;
         try {
           final pos = await _webosPlatform.getPosition(activeTex);

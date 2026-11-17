@@ -1,3 +1,4 @@
+import 'dart:ffi' show Abi;
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -44,6 +45,10 @@ class DevicePerformance {
       _singleton.getInstance(() => DevicePerformance._().._override = override, (instance) => instance._detect());
 
   Future<void> _detect() async {
+    if (Platform.isLinux && isWebosRuntime) {
+      _detectWebos();
+      return;
+    }
     if (!Platform.isAndroid) return; // tvOS/iOS/desktop: always full tier
     try {
       final result = await deviceChannel.invokeMapMethod<dynamic, dynamic>('getPerformanceSignals');
@@ -70,6 +75,32 @@ class DevicePerformance {
   /// flutter/skia override sticks. Impeller ignores it.
   static void _capSkiaResourceCache() {
     SystemChannels.skia.invokeMethod<void>('Skia.setResourceCacheMaxBytes', 48 << 20).ignore();
+  }
+
+  /// True when running on LG webOS. This fork only ships Linux builds for
+  /// webOS (the flutter-webos embedder reports `Platform.isLinux`), matching
+  /// TvDetectionService's `webos_tv` detection.
+  static final bool isWebosRuntime = Platform.isLinux;
+
+  /// webOS TVs run Plezy as a 32-bit ARM process (compat32 shim) that shares
+  /// RAM with the hardware video decoder and composites a 4K-class surface,
+  /// i.e. exactly the low-end profile the reduced tier exists for.
+  void _detectWebos() {
+    _is64Bit = !(Abi.current() == Abi.linuxArm || Abi.current() == Abi.linuxIA32);
+    try {
+      final memInfo = File('/proc/meminfo').readAsLinesSync();
+      for (final line in memInfo) {
+        if (!line.startsWith('MemTotal:')) continue;
+        final kb = int.tryParse(line.replaceAll(RegExp(r'[^0-9]'), ''));
+        if (kb != null) _totalMemBytes = kb * 1024;
+        break;
+      }
+    } catch (_) {}
+    _isLowRam = _totalMemBytes != null && _totalMemBytes! <= (3 << 30);
+    _autoReduced = true;
+    // Skia otherwise sizes its GPU cache from the 2880x1620 surface
+    // (~220MB); keep a roomier cap than Android since the surface is larger.
+    SystemChannels.skia.invokeMethod<void>('Skia.setResourceCacheMaxBytes', 96 << 20).ignore();
   }
 
   /// Total device RAM as reported by the platform, or null off-Android /
@@ -162,8 +193,10 @@ class DevicePerformance {
     _detectDisplayBudget();
     final cache = PaintingBinding.instance.imageCache;
     if (Platform.isLinux) {
-      cache.maximumSize = 2500;
-      cache.maximumSizeBytes = 250 << 20; // 250MB on webOS
+      // webOS: 32-bit process sharing RAM with the video decoder. Only
+      // off-screen entries are evicted, so on-screen art is unaffected.
+      cache.maximumSize = isReduced ? 400 : 600;
+      cache.maximumSizeBytes = isReduced ? (96 << 20) : (128 << 20);
       return;
     }
     if (PlatformDetector.isDesktopOS()) {

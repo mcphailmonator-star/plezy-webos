@@ -329,10 +329,27 @@ bool? _lastSentBackIntercept;
 
 int _syncTickCounter = 0;
 
+/// Set by the persistent frame callback; navigation/focus state can only
+/// change when a frame is produced, so idle ticks skip the element-tree walk.
+bool _webosBackPolicyDirty = true;
+
 void _syncWebosBackPolicy({bool force = false}) {
-  final shouldIntercept = _canAppHandleBackInternally();
   _syncTickCounter++;
-  if (force || _lastSentBackIntercept != shouldIntercept || (_syncTickCounter % 10 == 0)) {
+  // Re-send the cached value every ~5s in case the native side reset it.
+  final periodicResend = _syncTickCounter % 20 == 0;
+  if (!force && !_webosBackPolicyDirty) {
+    if (periodicResend && _lastSentBackIntercept != null) {
+      unawaited(
+        _webosAuxChannel.invokeMethod<void>('setBackPolicy', {
+          'intercept': _lastSentBackIntercept,
+        }).catchError((Object _) {}),
+      );
+    }
+    return;
+  }
+  _webosBackPolicyDirty = false;
+  final shouldIntercept = _canAppHandleBackInternally();
+  if (force || _lastSentBackIntercept != shouldIntercept || periodicResend) {
     if (_lastSentBackIntercept != shouldIntercept) {
       appLogger.i('[WebOS-Back] Updating _WEBOS_ACCESS_POLICY_KEYS_BACK intercept=$shouldIntercept');
     }
@@ -349,16 +366,20 @@ void _installWebosBackAndNavigationHooks() {
   if (!Platform.isLinux || _webosBackHooksInstalled) return;
   _webosBackHooksInstalled = true;
 
-  PaintingBinding.instance.imageCache.maximumSize = 2500;
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 250 * 1024 * 1024;
   WidgetsBinding.instance.addObserver(_WebosBackNavigationObserver());
   GestureBinding.instance.pointerRouter.addGlobalRoute(_handleWebosPointerRoute);
   FocusManager.instance.rootScope.onKeyEvent = _handleWebosRootBackKey;
 
+  // Cheap per-frame flag only; the expensive navigator scan runs at most
+  // every 250ms and only after something was actually redrawn.
   WidgetsBinding.instance.addPersistentFrameCallback((_) {
+    _webosBackPolicyDirty = true;
+  });
+  OverlaySheetController.openSheetCount.addListener(() {
+    _webosBackPolicyDirty = true;
     _syncWebosBackPolicy();
   });
-  Timer.periodic(const Duration(milliseconds: 200), (_) {
+  Timer.periodic(const Duration(milliseconds: 250), (_) {
     _syncWebosBackPolicy();
   });
 
@@ -378,10 +399,12 @@ void _installWebosBackAndNavigationHooks() {
         phys == 0x19c ||
         (phys == 0 && logi == 0); // Ungemappter webOS Remote Back-Key in XKB!
 
-    appLogger.i(
-      '[WebOS-KeyData] type=${data.type} phys=0x${phys.toRadixString(16)} '
-      'logi=0x${logi.toRadixString(16)} isBack=$isBackData',
-    );
+    if (debugLoggingEnabled) {
+      appLogger.d(
+        '[WebOS-KeyData] type=${data.type} phys=0x${phys.toRadixString(16)} '
+        'logi=0x${logi.toRadixString(16)} isBack=$isBackData',
+      );
+    }
 
     if (isBackData && !isTextEditingFocused() && _canAppHandleBackInternally()) {
       if (data.type == ui.KeyEventType.up) {
@@ -404,7 +427,7 @@ void _installWebosBackAndNavigationHooks() {
     final keyId = event.logicalKey.keyId;
     final usbHid = event.physicalKey.usbHidUsage;
     if (event.logicalKey.isBackKey || _isWebosBackKeyCode(keyId, usbHid, keyId)) {
-      appLogger.i('[WebOS-HWKey] event=${event.runtimeType} keyId=0x${keyId.toRadixString(16)}');
+      if (debugLoggingEnabled) appLogger.d('[WebOS-HWKey] event=${event.runtimeType} keyId=0x${keyId.toRadixString(16)}');
       if (!isTextEditingFocused() && _canAppHandleBackInternally()) {
         if (event is KeyUpEvent) {
           unawaited(_triggerInternalWebosBack());
@@ -417,7 +440,7 @@ void _installWebosBackAndNavigationHooks() {
 
   // 3. SystemChannels.navigation (popRoute)
   SystemChannels.navigation.setMethodCallHandler((MethodCall call) async {
-    appLogger.i('[WebOS-NavChannel] method=${call.method}');
+    appLogger.d('[WebOS-NavChannel] method=${call.method}');
     if (call.method == 'popRoute') {
       if (_canAppHandleBackInternally()) {
         await _triggerInternalWebosBack();
@@ -439,7 +462,7 @@ void _installWebosBackAndNavigationHooks() {
       final type = message['type']?.toString().toLowerCase() ?? '';
       isKeyUp = type.contains('up');
       isBack = _isWebosBackKeyCode(keyCode, scanCode, logical);
-      appLogger.i('[WebOS-KeyChannel] msg=$message isBack=$isBack');
+      if (debugLoggingEnabled) appLogger.d('[WebOS-KeyChannel] msg=$message isBack=$isBack');
     }
 
     if (!isBack) {
@@ -1874,7 +1897,11 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
   void _startRssWatchdog() {
     final int threshold;
     final Duration period;
-    if (PlatformDetector.isDesktopOS()) {
+    if (DevicePerformance.isWebosRuntime) {
+      // 32-bit process on a TV sharing RAM with the video decoder.
+      threshold = 640 << 20;
+      period = const Duration(seconds: 20);
+    } else if (PlatformDetector.isDesktopOS()) {
       threshold = 1536 << 20; // 1.5GB
       period = const Duration(seconds: 30);
     } else if (Platform.isAndroid) {
@@ -1909,7 +1936,12 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
   }
 
   void _evictImageCaches() {
-    if (Platform.isLinux) return;
+    if (Platform.isLinux) {
+      // webOS: drop only off-screen cached images; keep live ones so
+      // thumbnails don't blank out after the video overlay closes.
+      PaintingBinding.instance.imageCache.clear();
+      return;
+    }
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
   }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:collection';
 
@@ -49,11 +50,60 @@ class MemoryLogOutput {
 
   static final File _webosLogFile = File('/media/developer/apps/usr/palm/applications/$_webosAppId/appdata/plezy_runtime.log');
 
-  static void add(LogEntry entry) {
+  /// Rotate the on-disk runtime log past this size (keeps one `.1` backup).
+  static const int _maxLogFileBytes = 2 * 1024 * 1024;
+  static final bool _fileLoggingEnabled = Platform.isLinux;
+  static final StringBuffer _pendingFileLines = StringBuffer();
+  static int _pendingFileLineCount = 0;
+  static Timer? _fileFlushTimer;
+  static bool _fileFlushing = false;
+  static int _fileFailures = 0;
+
+  static void _queueFileLine(LogEntry entry) {
+    if (!_fileLoggingEnabled || _fileFailures >= 5) return;
+    _pendingFileLines.write(
+      '[${entry.timestamp.toIso8601String()}] [${entry.level.name}] ${entry.message}${entry.error != null ? " | err=${entry.error}" : ""}\n',
+    );
+    _pendingFileLineCount++;
+    // Errors and large batches flush promptly; everything else is batched so
+    // the UI isolate never blocks on (slow) TV flash storage.
+    final urgent = entry.level.value >= Level.error.value || _pendingFileLineCount >= 200;
+    if (urgent) {
+      _fileFlushTimer?.cancel();
+      _fileFlushTimer = Timer(Duration.zero, _flushFileLines);
+    } else {
+      _fileFlushTimer ??= Timer(const Duration(seconds: 2), _flushFileLines);
+    }
+  }
+
+  static Future<void> _flushFileLines() async {
+    _fileFlushTimer = null;
+    if (_fileFlushing || _pendingFileLines.isEmpty) return;
+    _fileFlushing = true;
+    final data = _pendingFileLines.toString();
+    _pendingFileLines.clear();
+    _pendingFileLineCount = 0;
     try {
-      final line = '[${entry.timestamp.toIso8601String()}] [${entry.level.name}] ${entry.message}${entry.error != null ? " | err=${entry.error}" : ""}\n';
-      _webosLogFile.writeAsStringSync(line, mode: FileMode.append);
-    } catch (_) {}
+      final file = _webosLogFile;
+      try {
+        if (await file.length() > _maxLogFileBytes) {
+          await file.rename('${file.path}.1');
+        }
+      } catch (_) {}
+      await file.writeAsString(data, mode: FileMode.append);
+      _fileFailures = 0;
+    } catch (_) {
+      _fileFailures++;
+    } finally {
+      _fileFlushing = false;
+      if (_pendingFileLines.isNotEmpty) {
+        _fileFlushTimer ??= Timer(const Duration(seconds: 2), _flushFileLines);
+      }
+    }
+  }
+
+  static void add(LogEntry entry) {
+    _queueFileLine(entry);
     _logs.add(entry);
     _currentSize += entry.estimatedSize;
     while (_currentSize > maxLogSizeBytes && _logs.isNotEmpty) {
