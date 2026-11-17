@@ -2524,7 +2524,10 @@ static void log_ls_error(const char *op, const char *detail, void *err) {
 static int is_internal_embedder_ls_call(const char *uri, const char *payload) {
     if (!uri) return 0;
     if (c_strstr(uri, "registerServerStatus")) return 1;
-    if (c_strstr(uri, "com.webos.service.applicationmanager/registerApp")) return 1;
+    if (c_strstr(uri, "com.webos.service.applicationmanager/registerApp") ||
+        c_strstr(uri, "com.webos.service.applicationmanager/registerNativeApp")) {
+        return 1;
+    }
     if (c_strstr(uri, "com.webos.service.tvpower")) return 1;
     if (c_strstr(uri, "screensaver") || c_strstr(uri, "service.sm")) return 1;
     if (c_strstr(uri, "com.webos.settingsservice") && payload &&
@@ -2675,6 +2678,7 @@ static void finish_ls_slot(struct compat_ls_slot *slot, uint32_t seq, void *sh, 
 }
 
 static void clear_ls_slots_for_token(void *sh, uint32_t token) {
+    if (!sh || token == 0U) return;
     compat_ls_acquire();
     for (int i = 0; i < COMPAT_LS_SLOT_COUNT; ++i) {
         if (g_ls_slots[i].used && g_ls_slots[i].sh == sh && g_ls_slots[i].token == token) {
@@ -2863,11 +2867,16 @@ EXPORT int LSMessageRespond(void *msg, const char *reply_payload, void *err) {
 
 EXPORT int LSCallCancel(void *sh, uint32_t token, void *err) {
     typedef int (*fn_t)(void *, uint32_t, void *);
-    clear_ls_slots_for_token(sh, token);
+    static uint32_t zero_logs = 0;
     if (!sh || is_fake_ls_handle(sh) || token == 0U) {
+        if (sh && !is_fake_ls_handle(sh) && token == 0U &&
+            __atomic_fetch_add(&zero_logs, 1U, __ATOMIC_RELAXED) < 5U) {
+            log_text(PMLOG_LEVEL_INFO, "LS2 LSCallCancel(token=0) ignored");
+        }
         safe_clear_lserror(err);
         return 1;
     }
+    clear_ls_slots_for_token(sh, token);
     fn_t real_fn = (fn_t)resolve_ls_sym("LSCallCancel", (void *)LSCallCancel);
     if (real_fn) {
         if (real_fn(sh, token, err)) return 1;
@@ -2943,15 +2952,16 @@ EXPORT int LSCallFromApplication(
         safe_clear_lserror(err);
         return 0;
     }
+    int wrap = (cb != 0 && is_internal_embedder_ls_call(uri, payload));
     uint32_t seq = 0;
-    struct compat_ls_slot *slot = cb ? alloc_ls_slot(sh, uri, payload, cb, ctx, 0, &seq) : 0;
+    struct compat_ls_slot *slot = wrap ? alloc_ls_slot(sh, uri, payload, cb, ctx, 0, &seq) : 0;
     int ok = real_fn(
         sh, uri, payload, app_id,
         slot ? compat_ls_reply_filter : cb,
         slot ? (void *)slot : ctx,
         ret_token, err
     );
-    finish_ls_slot(slot, seq, sh, ok, ret_token);
+    if (slot) finish_ls_slot(slot, seq, sh, ok, ret_token);
     if (!ok) log_ls_error("LSCallFromApplication", uri, err);
     return ok;
 }
@@ -2977,15 +2987,16 @@ EXPORT int LSCall(
         safe_clear_lserror(err);
         return 0;
     }
+    int wrap = (cb != 0 && is_internal_embedder_ls_call(uri, payload));
     uint32_t seq = 0;
-    struct compat_ls_slot *slot = cb ? alloc_ls_slot(sh, uri, payload, cb, ctx, 0, &seq) : 0;
+    struct compat_ls_slot *slot = wrap ? alloc_ls_slot(sh, uri, payload, cb, ctx, 0, &seq) : 0;
     int ok = real_fn(
         sh, uri, payload,
         slot ? compat_ls_reply_filter : cb,
         slot ? (void *)slot : ctx,
         ret_token, err
     );
-    finish_ls_slot(slot, seq, sh, ok, ret_token);
+    if (slot) finish_ls_slot(slot, seq, sh, ok, ret_token);
     if (!ok) log_ls_error("LSCall", uri, err);
     return ok;
 }
@@ -3011,15 +3022,16 @@ EXPORT int LSCallOneReply(
         safe_clear_lserror(err);
         return 0;
     }
+    int wrap = (cb != 0 && is_internal_embedder_ls_call(uri, payload));
     uint32_t seq = 0;
-    struct compat_ls_slot *slot = cb ? alloc_ls_slot(sh, uri, payload, cb, ctx, 1, &seq) : 0;
+    struct compat_ls_slot *slot = wrap ? alloc_ls_slot(sh, uri, payload, cb, ctx, 1, &seq) : 0;
     int ok = real_fn(
         sh, uri, payload,
         slot ? compat_ls_reply_filter : cb,
         slot ? (void *)slot : ctx,
         ret_token, err
     );
-    finish_ls_slot(slot, seq, sh, ok, ret_token);
+    if (slot) finish_ls_slot(slot, seq, sh, ok, ret_token);
     if (!ok) log_ls_error("LSCallOneReply", uri, err);
     return ok;
 }
@@ -3046,15 +3058,16 @@ EXPORT int LSCallFromApplicationOneReply(
         safe_clear_lserror(err);
         return 0;
     }
+    int wrap = (cb != 0 && is_internal_embedder_ls_call(uri, payload));
     uint32_t seq = 0;
-    struct compat_ls_slot *slot = cb ? alloc_ls_slot(sh, uri, payload, cb, ctx, 1, &seq) : 0;
+    struct compat_ls_slot *slot = wrap ? alloc_ls_slot(sh, uri, payload, cb, ctx, 1, &seq) : 0;
     int ok = real_fn(
         sh, uri, payload, app_id,
         slot ? compat_ls_reply_filter : cb,
         slot ? (void *)slot : ctx,
         ret_token, err
     );
-    finish_ls_slot(slot, seq, sh, ok, ret_token);
+    if (slot) finish_ls_slot(slot, seq, sh, ok, ret_token);
     if (!ok) log_ls_error("LSCallFromApplicationOneReply", uri, err);
     return ok;
 }
@@ -3087,7 +3100,16 @@ EXPORT char *HApp_GetCurrentAppID(char *buf, unsigned int size) {
 }
 
 EXPORT const char *SDL_webOSCreateExportedWindow(unsigned int exportedType) {
-    (void)exportedType;
+    static uint32_t create_logs = 0;
+    if (__atomic_fetch_add(&create_logs, 1U, __ATOMIC_RELAXED) < 6U) {
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "SDL_webOSCreateExportedWindow type=");
+        lbuf_u32(&b, exportedType);
+        lbuf_str(&b, " -> ");
+        lbuf_str_trunc(&b, g_last_window_id, 64);
+        log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+    }
     return g_last_window_id;
 }
 
@@ -3107,9 +3129,18 @@ EXPORT int SDL_webOSExportedSetCropRegion(const char *windowID, const void *orgR
 }
 
 EXPORT int SDL_webOSExportedSetProperty(const char *windowID, const char *name, const char *value) {
-    (void)windowID;
-    (void)name;
-    (void)value;
+    static uint32_t prop_logs = 0;
+    if (__atomic_fetch_add(&prop_logs, 1U, __ATOMIC_RELAXED) < 6U) {
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "SDL_webOSExportedSetProperty id=");
+        lbuf_str_trunc(&b, windowID ? windowID : "(null)", 48);
+        lbuf_str(&b, " ");
+        lbuf_str_trunc(&b, name ? name : "(null)", 48);
+        lbuf_str(&b, "=");
+        lbuf_str_trunc(&b, value ? value : "(null)", 48);
+        log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+    }
     return 1;
 }
 
@@ -3135,29 +3166,55 @@ EXPORT void SDL_GetWindowSize(void *window, int *w, int *h) {
 EXPORT int NDL_MediaInitWithWindowId(void *arg, const char *windowId) {
     typedef int (*fn2_t)(void *, const char *);
     typedef int (*fn1_t)(void *);
+    static uint32_t init_logs = 0;
     if (windowId && windowId[0]) {
         copy_str(g_last_window_id, windowId, sizeof(g_last_window_id));
     }
     fn2_t f2 = (fn2_t)resolve_ndl_sym("NDL_MediaInitWithWindowId");
-    if (f2) return f2(arg, windowId);
+    if (f2) {
+        int rc = f2(arg, windowId);
+        if (__atomic_fetch_add(&init_logs, 1U, __ATOMIC_RELAXED) < 6U) {
+            struct log_buf b;
+            lbuf_init(&b);
+            lbuf_str(&b, "NDL_MediaInitWithWindowId(native) id=");
+            lbuf_str_trunc(&b, windowId ? windowId : "(null)", 64);
+            lbuf_str(&b, " rc=");
+            lbuf_i32(&b, rc);
+            log_raw_line(rc == 0 ? PMLOG_LEVEL_INFO : PMLOG_LEVEL_ERROR, &b, 1);
+        }
+        return rc;
+    }
     fn1_t f1 = (fn1_t)resolve_ndl_sym("NDL_MediaInit");
-    if (f1) return f1(arg);
+    if (f1) {
+        int rc = f1(arg);
+        if (__atomic_fetch_add(&init_logs, 1U, __ATOMIC_RELAXED) < 6U) {
+            struct log_buf b;
+            lbuf_init(&b);
+            lbuf_str(&b, "NDL_MediaInitWithWindowId(fallback) id=");
+            lbuf_str_trunc(&b, windowId ? windowId : "(null)", 64);
+            lbuf_str(&b, " rc=");
+            lbuf_i32(&b, rc);
+            log_raw_line(rc == 0 ? PMLOG_LEVEL_INFO : PMLOG_LEVEL_ERROR, &b, 1);
+        }
+        return rc;
+    }
     return 0;
 }
 
-EXPORT int NDL_MediaUnsubscribeEvents(void *handle) {
-    typedef int (*fn_t)(void *);
+EXPORT int NDL_MediaUnsubscribeEvents(void) {
+    typedef int (*fn_t)(void);
     fn_t f = (fn_t)resolve_ndl_sym("NDL_MediaUnsubscribeEvents");
-    if (f) return f(handle);
+    if (f) return f();
     return 0;
 }
 
 EXPORT int NDL_MediaSelectAudioTrack(int trackIndex) {
     typedef int (*fn1_t)(int);
+    typedef int (*fn2_t)(const char *, int);
     fn1_t f1 = (fn1_t)resolve_ndl_sym("NDL_MediaSelectAudioTrack");
     if (f1) return f1(trackIndex);
-    fn1_t f2 = (fn1_t)resolve_ndl_sym("NDL_MediaSelectTrack");
-    if (f2) return f2(trackIndex);
+    fn2_t f2 = (fn2_t)resolve_ndl_sym("NDL_MediaSelectTrack");
+    if (f2) return f2("audio", trackIndex);
     return 0;
 }
 
