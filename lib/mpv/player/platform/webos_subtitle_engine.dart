@@ -29,8 +29,13 @@ class WebosDirectStreamFallbackRegistry {
   Map<String, String>? lastHeaders;
   Future<String?> Function()? _buildDirectStreamUrlCallback;
 
+  static String get _webosAppId {
+    final envId = Platform.environment['APP_ID']?.trim();
+    return (envId != null && envId.isNotEmpty) ? envId : 'com.mcphailmonator.plezy';
+  }
+
   static final File _cacheFile = File(
-    '/media/developer/apps/usr/palm/applications/com.edde746.plezy/appdata/webos_unseekable_mkvs.json',
+    '/media/developer/apps/usr/palm/applications/$_webosAppId/appdata/webos_unseekable_mkvs.json',
   );
 
   void _loadFromDisk() {
@@ -438,8 +443,13 @@ class WebosSubtitlePreferenceStore {
   bool _autoSelectDoneForCurrentMedia = false;
   int _lastEvaluatedTrackCount = 0;
 
+  static String get _webosAppId {
+    final envId = Platform.environment['APP_ID']?.trim();
+    return (envId != null && envId.isNotEmpty) ? envId : 'com.mcphailmonator.plezy';
+  }
+
   static final File _prefFile = File(
-    '/media/developer/apps/usr/palm/applications/com.edde746.plezy/appdata/webos_sub_pref.json',
+    '/media/developer/apps/usr/palm/applications/$_webosAppId/appdata/webos_sub_pref.json',
   );
 
   void _loadFromDisk() {

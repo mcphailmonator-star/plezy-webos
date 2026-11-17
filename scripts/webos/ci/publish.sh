@@ -48,9 +48,12 @@ else
   echo "WARNING: no GH_TOKEN available; skipping hb-repo branch update" >&2
 fi
 
+APP_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$REPO_ROOT/webos/meta/appinfo.json" 2>/dev/null || true)"
+APP_ID="${APP_ID:-com.mcphailmonator.plezy}"
+
 NOTES_TMP="$(mktemp)"
 cat << NOTES_EOF > "$NOTES_TMP"
-Native 32-bit ARM (\`armv7l\`) packages of Plezy for LG webOS TVs. Both builds share the application ID \`com.edde746.plezy\`. Only one package or Homebrew repository should be active on a TV at a time.
+Native 32-bit ARM (\`armv7l\`) packages of Plezy for LG webOS TVs. Both builds share the application ID \`${APP_ID}\`. Only one package or Homebrew repository should be active on a TV at a time.
 
 ### Package Selection (TV Model Year vs. webOS Version)
 
@@ -63,8 +66,8 @@ Which package your TV requires depends primarily on the **hardware release year*
 
 | Target Hardware / Runtime | IPK Package | Homebrew Repository URL (add in Homebrew Settings) |
 | :--- | :--- | :--- |
-| Pre-2025 hardware (webOS 6.x–24 & Re:New-updated TVs) | \`com.edde746.plezy_*_arm_webos6-24.ipk\` | ${RAW_REPO_BASE}/plezy-webos6-24.repo.json |
-| Factory webOS 25 / 26 hardware (2025+ models) | \`com.edde746.plezy_*_arm_webos25-26.ipk\` | ${RAW_REPO_BASE}/plezy-webos25-26.repo.json |
+| Pre-2025 hardware (webOS 6.x–24 & Re:New-updated TVs) | \`${APP_ID}_*_arm_webos6-24.ipk\` | ${RAW_REPO_BASE}/plezy-webos6-24.repo.json |
+| Factory webOS 25 / 26 hardware (2025+ models) | \`${APP_ID}_*_arm_webos25-26.ipk\` | ${RAW_REPO_BASE}/plezy-webos25-26.repo.json |
 
 *(Release asset mirrors: ${LATEST_RELEASE_BASE}/plezy-webos6-24.repo.json and ${LATEST_RELEASE_BASE}/plezy-webos25-26.repo.json)*
 

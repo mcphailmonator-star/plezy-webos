@@ -42,7 +42,12 @@ class MemoryLogOutput {
 
   /// Append [entry], evicting the oldest entries once the buffer exceeds
   /// [maxLogSizeBytes] — O(1) with ListQueue.
-  static final File _webosLogFile = File('/media/developer/apps/usr/palm/applications/com.edde746.plezy/appdata/plezy_runtime.log');
+  static String get _webosAppId {
+    final envId = Platform.environment['APP_ID']?.trim();
+    return (envId != null && envId.isNotEmpty) ? envId : 'com.mcphailmonator.plezy';
+  }
+
+  static final File _webosLogFile = File('/media/developer/apps/usr/palm/applications/$_webosAppId/appdata/plezy_runtime.log');
 
   static void add(LogEntry entry) {
     try {

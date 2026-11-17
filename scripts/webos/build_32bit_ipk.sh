@@ -14,14 +14,19 @@ if [ -f "$REPO_ROOT/scripts/webos/env.sh" ]; then
   source "$REPO_ROOT/scripts/webos/env.sh"
 fi
 
-APP_VER="$(grep -E '^version:' "$REPO_ROOT/pubspec.yaml" | head -n 1 | awk '{print $2}' | cut -d'+' -f1)"
-APP_VER="${APP_VER:-2.26.0}"
+APP_ID="${APP_ID:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$REPO_ROOT/webos/meta/appinfo.json" 2>/dev/null || true)}"
+APP_ID="${APP_ID:-com.mcphailmonator.plezy}"
+APP_VER="${APP_VER:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$REPO_ROOT/webos/meta/appinfo.json" 2>/dev/null || grep -E '^version:' "$REPO_ROOT/pubspec.yaml" | head -n 1 | awk '{print $2}' | cut -d'+' -f1)}"
+APP_VER="${APP_VER:-2.26.1}"
 
 mkdir -p "$OUT_DIR"
 
-ORIG_IPK="${ORIG_IPK:-$(find "$REPO_ROOT/build" -name "*.ipk" 2>/dev/null | grep -v -E "(-32bit|_webos6-24|_webos25-26)\.ipk" | head -n 1 || true)}"
+ORIG_IPK="${ORIG_IPK:-$(find "$REPO_ROOT/build" -name "${APP_ID}_*.ipk" 2>/dev/null | grep -v -E "(-32bit|_webos6-24|_webos25-26)\.ipk" | head -n 1 || true)}"
 if [ -z "$ORIG_IPK" ] || [ ! -f "$ORIG_IPK" ]; then
-  ORIG_IPK="$OUT_DIR/com.edde746.plezy_${APP_VER}_arm_webos25-26.ipk"
+  ORIG_IPK="${ORIG_IPK:-$(find "$REPO_ROOT/build" -name "*.ipk" 2>/dev/null | grep -v -E "(-32bit|_webos6-24|_webos25-26)\.ipk" | head -n 1 || true)}"
+fi
+if [ -z "$ORIG_IPK" ] || [ ! -f "$ORIG_IPK" ]; then
+  ORIG_IPK="$OUT_DIR/${APP_ID}_${APP_VER}_arm_webos25-26.ipk"
 fi
 
 if [ ! -f "$ORIG_IPK" ]; then
@@ -29,7 +34,7 @@ if [ ! -f "$ORIG_IPK" ]; then
   exit 1
 fi
 
-MODERN_IPK_PATH="$OUT_DIR/com.edde746.plezy_${APP_VER}_arm_webos25-26.ipk"
+MODERN_IPK_PATH="$OUT_DIR/${APP_ID}_${APP_VER}_arm_webos25-26.ipk"
 if [ "$(realpath "$ORIG_IPK")" != "$(realpath "$MODERN_IPK_PATH" 2>/dev/null || echo "")" ]; then
   cp -f "$ORIG_IPK" "$MODERN_IPK_PATH"
 fi
@@ -590,6 +595,10 @@ static fn_setenv_t      g_real_setenv      = 0;
 static fn_getenv_t      g_real_getenv      = 0;
 static fn_pmlog_str_t   g_pmlog_str        = 0;
 static const void      *g_pmlog_ctx        = 0;
+
+#ifndef COMPAT32_APP_ID
+#define COMPAT32_APP_ID "com.mcphailmonator.plezy"
+#endif
 
 static char g_exe_dir[512]       = "";
 static char g_appdata_dir[512]   = "/tmp/plezy_appdata";
@@ -1575,10 +1584,10 @@ static int probe_writable_dir(const char *cand) {
 
     char sub[512];
     const char *subdirs[7] = {
-        "com.edde746.plezy",
-        ".cache", ".cache/com.edde746.plezy",
-        ".data", ".data/com.edde746.plezy",
-        ".download", ".download/com.edde746.plezy"
+        COMPAT32_APP_ID,
+        ".cache", ".cache/" COMPAT32_APP_ID,
+        ".data", ".data/" COMPAT32_APP_ID,
+        ".download", ".download/" COMPAT32_APP_ID
     };
     for (int i = 0; i < 7; ++i) {
         join_path(sub, sizeof(sub), cand, subdirs[i]);
@@ -1670,7 +1679,7 @@ EXPORT char *getenv(const char *name) {
         }
         if (strcmp(name, "APP_ID") == 0 || strcmp(name, "FLUTTER_APP_ID") == 0) {
             char *val = g_real_getenv ? g_real_getenv(name) : 0;
-            if (!val || !val[0]) return "com.edde746.plezy";
+            if (!val || !val[0]) return COMPAT32_APP_ID;
             return val;
         }
     }
@@ -1694,8 +1703,8 @@ static void ensure_compat_init(void) {
     install_crash_handlers();
 
     if (g_real_setenv && dir) {
-        g_real_setenv("APP_ID", "com.edde746.plezy", 0);
-        g_real_setenv("FLUTTER_APP_ID", "com.edde746.plezy", 0);
+        g_real_setenv("APP_ID", COMPAT32_APP_ID, 0);
+        g_real_setenv("FLUTTER_APP_ID", COMPAT32_APP_ID, 0);
         g_real_setenv("FLUTTER_HOME", dir, 1);
         g_real_setenv("FLUTTER_APPDATA_HOME", dir, 1);
         g_real_setenv("FLUTTER_TEMP_HOME", cache_dir, 1);
@@ -3093,10 +3102,10 @@ static void *resolve_ndl_sym(const char *name) {
 
 EXPORT char *HApp_GetCurrentAppID(char *buf, unsigned int size) {
     if (buf && size > 0) {
-        copy_str(buf, "com.edde746.plezy", size);
+        copy_str(buf, COMPAT32_APP_ID, size);
         return buf;
     }
-    return "com.edde746.plezy";
+    return COMPAT32_APP_ID;
 }
 
 EXPORT const char *SDL_webOSCreateExportedWindow(unsigned int exportedType) {
@@ -3287,6 +3296,7 @@ PYEOF
 
 "$CLANG_BIN" -target armv7a-linux-gnueabi -mfloat-abi=softfp -march=armv7-a \
   -Wall -Wextra -Werror=implicit-function-declaration -Werror=return-type -Wno-unused-parameter \
+  "-DCOMPAT32_APP_ID=\"${APP_ID}\"" \
   -fuse-ld=lld -shared -fPIC -O2 -nostdlib -fno-stack-protector \
   -Wl,-soname,libwebos_compat32.so \
   "$STAGE_DIR/webos_compat32.c" \
@@ -3620,14 +3630,14 @@ rm -rf "$APP_DIR/appdata/"* "$APP_DIR/appdata/".* 2>/dev/null || true
 chmod 0777 "$APP_DIR/appdata" 2>/dev/null || true
 chmod 0755 "$APP_DIR/lib/"*.so* 2>/dev/null || true
 
-echo "=== [7/7] Baue kompatibles Paket (SysV ar + POSIX ustar): com.edde746.plezy_${APP_VER}_arm_webos6-24.ipk ==="
+echo "=== [7/7] Baue kompatibles Paket (SysV ar + POSIX ustar): ${APP_ID}_${APP_VER}_arm_webos6-24.ipk ==="
 mkdir -p "$STAGE_DIR/ctrl_extract"
 tar -xzf "$STAGE_DIR/ipk_extract/control.tar.gz" -C "$STAGE_DIR/ctrl_extract"
 
-OUT_COMPAT_PATH="$OUT_DIR/com.edde746.plezy_${APP_VER}_arm_webos6-24.ipk"
+OUT_COMPAT_PATH="$OUT_DIR/${APP_ID}_${APP_VER}_arm_webos6-24.ipk"
 rm -f "$OUT_COMPAT_PATH"
 
-python3 - "$STAGE_DIR" "$OUT_COMPAT_PATH" << 'PYEOF'
+python3 - "$STAGE_DIR" "$OUT_COMPAT_PATH" "$APP_ID" << 'PYEOF'
 import gzip
 import io
 import os
@@ -3639,6 +3649,7 @@ from pathlib import Path
 
 stage_dir = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
+app_id = sys.argv[3]
 data_root = stage_dir / "data_extract"
 ctrl_path = stage_dir / "ctrl_extract" / "control"
 ipk_extract = stage_dir / "ipk_extract"
@@ -3827,18 +3838,18 @@ with tarfile.open(fileobj=io.BytesIO(gzip.decompress(parsed["data.tar.gz"])), mo
         assert not m.pax_headers, f"PAX header present on {m.name!r}"
         assert 0 < m.mtime <= ipk_mtime
     for required in (
-        "usr/palm/applications/com.edde746.plezy/appinfo.json",
-        "usr/palm/packages/com.edde746.plezy/packageinfo.json",
-        "usr/palm/applications/com.edde746.plezy/plezy",
-        "usr/palm/applications/com.edde746.plezy/lib/libwebos_compat32.so",
-        "usr/palm/applications/com.edde746.plezy/lib/libsqlite3_dart.so",
-        "usr/palm/applications/com.edde746.plezy/lib/libstdc++.so.6",
-        "usr/palm/applications/com.edde746.plezy/data/flutter_assets/NativeAssetsManifest.json",
+        f"usr/palm/applications/{app_id}/appinfo.json",
+        f"usr/palm/packages/{app_id}/packageinfo.json",
+        f"usr/palm/applications/{app_id}/plezy",
+        f"usr/palm/applications/{app_id}/lib/libwebos_compat32.so",
+        f"usr/palm/applications/{app_id}/lib/libsqlite3_dart.so",
+        f"usr/palm/applications/{app_id}/lib/libstdc++.so.6",
+        f"usr/palm/applications/{app_id}/data/flutter_assets/NativeAssetsManifest.json",
     ):
         assert required in names, f"missing {required} in data.tar.gz"
-    assert (names["usr/palm/applications/com.edde746.plezy/plezy"].mode & 0o777) == 0o755
+    assert (names[f"usr/palm/applications/{app_id}/plezy"].mode & 0o777) == 0o755
     for mname, m in names.items():
-        if mname.startswith("usr/palm/applications/com.edde746.plezy/lib/") and ".so" in Path(mname).name and not m.isdir():
+        if mname.startswith(f"usr/palm/applications/{app_id}/lib/") and ".so" in Path(mname).name and not m.isdir():
             assert (m.mode & 0o777) == 0o755, f"unexpected mode {oct(m.mode)} on {mname}"
 
 print(
