@@ -1992,6 +1992,171 @@ EXPORT void *wl_display_connect(const char *name) {
 }
 
 /* ============================================================================
+ * Wayland-EGL Dynamic Bridge (libwayland-egl.so.1 -> libwayland-egl.so.0 / Mali)
+ * ============================================================================ */
+#define COMPAT_WL_EGL_CAND_COUNT 10
+
+static void *resolve_wl_egl_sym(const char *name, void *self_fn, const char **out_src) {
+    static const char *const cands[COMPAT_WL_EGL_CAND_COUNT] = {
+        "libwayland-egl.so.1",
+        "/usr/lib/libwayland-egl.so.1",
+        "libwayland-egl.so.0",
+        "/usr/lib/libwayland-egl.so.0",
+        "libwayland-egl.so",
+        "/usr/lib/libwayland-egl.so",
+        "libEGL.so.1",
+        "/usr/lib/libEGL.so.1",
+        "libmali.so.0",
+        "/usr/lib/libmali.so.0",
+    };
+    static void *handles[COMPAT_WL_EGL_CAND_COUNT] = {0};
+    static volatile int handle_state[COMPAT_WL_EGL_CAND_COUNT] = {0}; /* 0=init, 1=opening, 2=done */
+
+    void *fn = dlsym(RTLD_NEXT, name);
+    if (fn && fn != self_fn) {
+        if (out_src) *out_src = "RTLD_NEXT";
+        return fn;
+    }
+
+    for (unsigned int i = 0; i < COMPAT_WL_EGL_CAND_COUNT; ++i) {
+        int st = __atomic_load_n(&handle_state[i], __ATOMIC_ACQUIRE);
+        if (st == 0) {
+            int expected = 0;
+            if (__atomic_compare_exchange_n(&handle_state[i], &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                void *h = dlopen(cands[i], RTLD_LAZY);
+                __atomic_store_n(&handles[i], h, __ATOMIC_RELEASE);
+                __atomic_store_n(&handle_state[i], 2, __ATOMIC_RELEASE);
+            } else {
+                while (__atomic_load_n(&handle_state[i], __ATOMIC_ACQUIRE) == 1) {}
+            }
+        } else {
+            while (__atomic_load_n(&handle_state[i], __ATOMIC_ACQUIRE) == 1) {}
+        }
+        void *h = __atomic_load_n(&handles[i], __ATOMIC_ACQUIRE);
+        if (h) {
+            fn = dlsym(h, name);
+            if (fn && fn != self_fn) {
+                if (out_src) *out_src = cands[i];
+                return fn;
+            }
+        }
+    }
+    if (out_src) *out_src = 0;
+    return 0;
+}
+
+EXPORT void *wl_egl_window_create(void *surface, int width, int height) {
+    typedef void *(*fn_t)(void *, int, int);
+    static void *cached_fn = 0;
+    static int logged_ok = 0;
+    static int logged_fail = 0;
+    const char *src = 0;
+
+    fn_t real_fn = (fn_t)__atomic_load_n(&cached_fn, __ATOMIC_ACQUIRE);
+    if (!real_fn) {
+        real_fn = (fn_t)resolve_wl_egl_sym("wl_egl_window_create", (void *)wl_egl_window_create, &src);
+        if (real_fn) {
+            __atomic_store_n(&cached_fn, (void *)real_fn, __ATOMIC_RELEASE);
+        }
+    }
+    if (!real_fn) {
+        if (!__atomic_exchange_n(&logged_fail, 1, __ATOMIC_ACQ_REL)) {
+            log_text(PMLOG_LEVEL_ERROR, "wl_egl_window_create resolve FAILED");
+        }
+        return 0;
+    }
+
+    void *win = real_fn(surface, width, height);
+    if (!win) {
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "wl_egl_window_create returned NULL src=");
+        lbuf_str_trunc(&b, src ? src : "cached", 64);
+        lbuf_str(&b, " w=");
+        lbuf_i32(&b, width);
+        lbuf_str(&b, " h=");
+        lbuf_i32(&b, height);
+        log_raw_line(PMLOG_LEVEL_ERROR, &b, 1);
+    } else if (!__atomic_exchange_n(&logged_ok, 1, __ATOMIC_ACQ_REL)) {
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "wl_egl_window_create ok src=");
+        lbuf_str_trunc(&b, src ? src : "cached", 64);
+        lbuf_str(&b, " w=");
+        lbuf_i32(&b, width);
+        lbuf_str(&b, " h=");
+        lbuf_i32(&b, height);
+        log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+    }
+    return win;
+}
+
+EXPORT void wl_egl_window_destroy(void *egl_window) {
+    typedef void (*fn_t)(void *);
+    static void *cached_fn = 0;
+    static int logged_fail = 0;
+
+    fn_t real_fn = (fn_t)__atomic_load_n(&cached_fn, __ATOMIC_ACQUIRE);
+    if (!real_fn) {
+        real_fn = (fn_t)resolve_wl_egl_sym("wl_egl_window_destroy", (void *)wl_egl_window_destroy, 0);
+        if (real_fn) {
+            __atomic_store_n(&cached_fn, (void *)real_fn, __ATOMIC_RELEASE);
+        }
+    }
+    if (!real_fn) {
+        if (!__atomic_exchange_n(&logged_fail, 1, __ATOMIC_ACQ_REL)) {
+            log_text(PMLOG_LEVEL_ERROR, "wl_egl_window_destroy resolve FAILED");
+        }
+        return;
+    }
+    real_fn(egl_window);
+}
+
+EXPORT void wl_egl_window_resize(void *egl_window, int width, int height, int dx, int dy) {
+    typedef void (*fn_t)(void *, int, int, int, int);
+    static void *cached_fn = 0;
+    static int logged_fail = 0;
+
+    fn_t real_fn = (fn_t)__atomic_load_n(&cached_fn, __ATOMIC_ACQUIRE);
+    if (!real_fn) {
+        real_fn = (fn_t)resolve_wl_egl_sym("wl_egl_window_resize", (void *)wl_egl_window_resize, 0);
+        if (real_fn) {
+            __atomic_store_n(&cached_fn, (void *)real_fn, __ATOMIC_RELEASE);
+        }
+    }
+    if (!real_fn) {
+        if (!__atomic_exchange_n(&logged_fail, 1, __ATOMIC_ACQ_REL)) {
+            log_text(PMLOG_LEVEL_ERROR, "wl_egl_window_resize resolve FAILED");
+        }
+        return;
+    }
+    real_fn(egl_window, width, height, dx, dy);
+}
+
+EXPORT void wl_egl_window_get_attached_size(void *egl_window, int *width, int *height) {
+    typedef void (*fn_t)(void *, int *, int *);
+    static void *cached_fn = 0;
+    static int logged_fail = 0;
+
+    fn_t real_fn = (fn_t)__atomic_load_n(&cached_fn, __ATOMIC_ACQUIRE);
+    if (!real_fn) {
+        real_fn = (fn_t)resolve_wl_egl_sym("wl_egl_window_get_attached_size", (void *)wl_egl_window_get_attached_size, 0);
+        if (real_fn) {
+            __atomic_store_n(&cached_fn, (void *)real_fn, __ATOMIC_RELEASE);
+        }
+    }
+    if (!real_fn) {
+        if (!__atomic_exchange_n(&logged_fail, 1, __ATOMIC_ACQ_REL)) {
+            log_text(PMLOG_LEVEL_ERROR, "wl_egl_window_get_attached_size resolve FAILED");
+        }
+        if (width) *width = 0;
+        if (height) *height = 0;
+        return;
+    }
+    real_fn(egl_window, width, height);
+}
+
+/* ============================================================================
  * EGL Config/Context/Surface Resilience & Diagnostics (Mali / webOS 6)
  * ============================================================================ */
 #define COMPAT_EGL_ALPHA_SIZE            0x3021
@@ -3071,10 +3236,10 @@ PYEOF
   -o "$APP_DIR/lib/libwebos_compat32.so"
 chmod 0755 "$APP_DIR/lib/libwebos_compat32.so"
 patchelf --set-rpath '$ORIGIN' --force-rpath "$APP_DIR/lib/libwebos_compat32.so"
+patchelf --add-needed libc.so.6 "$APP_DIR/lib/libwebos_compat32.so"
 patchelf --add-needed librt.so.1 "$APP_DIR/lib/libwebos_compat32.so"
 patchelf --add-needed libpthread.so.0 "$APP_DIR/lib/libwebos_compat32.so"
 patchelf --add-needed libdl.so.2 "$APP_DIR/lib/libwebos_compat32.so"
-patchelf --add-needed libc.so.6 "$APP_DIR/lib/libwebos_compat32.so"
 
 echo "  -> libwebos_compat32.so mit clang -nostdlib gebaut!"
 
@@ -3091,8 +3256,10 @@ prepend_compat_libs() {
   done
   # patchelf --add-needed prepends to the front of DT_NEEDED, so insert in reverse
   # to yield: libwebos_compat32.so, libdl.so.2, libpthread.so.0, librt.so.1, <existing...>
+  # Also strip libwayland-egl.so.1 so webOS 6 (which only ships libwayland-egl.so.0)
+  # resolves wl_egl_window_* dynamically via libwebos_compat32.so.
   local filtered
-  filtered="$(printf '%s\n' $existing | grep -v -E '^(libwebos_compat32\.so|libdl\.so\.2|libpthread\.so\.0|librt\.so\.1)$' || true)"
+  filtered="$(printf '%s\n' $existing | grep -v -E '^(libwebos_compat32\.so|libdl\.so\.2|libpthread\.so\.0|librt\.so\.1|libwayland-egl\.so\.1)$' || true)"
   local rev_existing
   rev_existing="$(printf '%s\n' $filtered | tac)"
   for lib in $rev_existing; do
@@ -3143,19 +3310,9 @@ elif cnt_v2 == 0 and cnt_v1 >= 3:
 else:
     raise RuntimeError(f"Unerwartete WebOSSurface-Signaturzahl: sig_v2={cnt_v2}, sig_v1={cnt_v1}")
 
+# Math symbols in libm.so.6 whose ARM32 ABI is unchanged across GLIBC_2.4..GLIBC_2.38
 REMAP_TO_GLIBC_2_4 = {
-    "dladdr", "dlclose", "dlerror", "dlopen", "dlsym",
     "exp", "exp2", "fmod", "fmodf", "hypot", "hypotf", "log", "log2", "pow",
-    "pthread_attr_getstack", "pthread_attr_setstacksize",
-    "pthread_condattr_setclock", "pthread_create", "pthread_detach",
-    "pthread_getattr_np", "pthread_getspecific", "pthread_join",
-    "pthread_key_create", "pthread_key_delete", "pthread_mutex_trylock",
-    "pthread_mutexattr_destroy", "pthread_mutexattr_init", "pthread_mutexattr_settype",
-    "pthread_once", "pthread_rwlock_destroy", "pthread_rwlock_init",
-    "pthread_rwlock_rdlock", "pthread_rwlock_unlock", "pthread_rwlock_wrlock",
-    "pthread_setspecific", "pthread_sigmask",
-    "sem_destroy", "sem_init", "sem_post", "sem_trywait", "sem_wait",
-    "shm_open", "shm_unlink",
 }
 
 UNVERSION_SYMBOLS = {
@@ -3168,6 +3325,18 @@ UNVERSION_SYMBOLS = {
     "pthread_getname_np",
     "pthread_setname_np",
 }
+
+# In glibc 2.34+, libpthread/libdl/librt symbols moved into libc.so.6. Unversioning them
+# (vs_val = 1) lets glibc 2.28-2.33 bind them from libpthread.so.0/libdl.so.2/librt.so.1
+# without failing the Vernaux filename check if libc.so.6 appears earlier in a lookup scope,
+# while still binding cleanly against libc.so.6 default versions on glibc 2.34+.
+UNVERSION_THREAD_DL_RT_FILES = {
+    "libc.so.6",
+    "libpthread.so.0",
+    "libdl.so.2",
+    "librt.so.1",
+}
+DL_MOVE_SYMBOLS = {"dladdr", "dlclose", "dlerror", "dlopen", "dlsym"}
 
 DISALLOWED_GLIBC_VERSIONS = {
     "GLIBC_2.29", "GLIBC_2.30", "GLIBC_2.31", "GLIBC_2.32", "GLIBC_2.33",
@@ -3289,11 +3458,21 @@ def patch_elf_cleanly(elf_path: Path):
                 continue
             vn_file, ver_name = ndx_info.get(raw_ndx, ("", ""))
 
-            if sym_name in UNVERSION_SYMBOLS or sym_name.startswith("__isoc23_"):
+            if (
+                sym_name in UNVERSION_SYMBOLS
+                or sym_name.startswith("__isoc23_")
+                or (
+                    vn_file in UNVERSION_THREAD_DL_RT_FILES
+                    and (
+                        sym_name.startswith(("pthread_", "sem_", "shm_"))
+                        or sym_name in DL_MOVE_SYMBOLS
+                    )
+                )
+            ):
                 struct.pack_into("<H", data, vs_off + sym_idx * 2, 1)
                 modified = True
             elif sym_name in REMAP_TO_GLIBC_2_4 and ver_name != "GLIBC_2.4":
-                target_ndx = file_ver_to_ndx.get((vn_file, "GLIBC_2.4")) or file_ver_to_ndx.get(("libc.so.6", "GLIBC_2.4"))
+                target_ndx = file_ver_to_ndx.get((vn_file, "GLIBC_2.4"))
                 if target_ndx is None:
                     raise RuntimeError(f"{elf_path.name}: Kein GLIBC_2.4 Verneed-Eintrag fuer {sym_name}@{ver_name} ({vn_file})")
                 struct.pack_into("<H", data, vs_off + sym_idx * 2, (vs_val & 0x8000) | target_ndx)
@@ -3325,20 +3504,19 @@ def patch_elf_cleanly(elf_path: Path):
             kept_aux = []
             for a in grp["aux"]:
                 raw_ndx = a["other"] & 0x7FFF
-                if raw_ndx in used_indices or a["ver_name"] not in DISALLOWED_GLIBC_VERSIONS:
-                    # Drop unused GLIBC >= 2.29 entries, keep <= 2.28 or actually used entries
-                    if a["ver_name"] in DISALLOWED_GLIBC_VERSIONS and raw_ndx not in used_indices:
-                        removed_any_aux = True
-                    elif raw_ndx not in used_indices and a["ver_name"].startswith("GLIBC_") and a["ver_name"] != "GLIBC_2.4":
-                        removed_any_aux = True
-                    else:
-                        kept_aux.append(a)
-                else:
+                if raw_ndx in used_indices:
+                    kept_aux.append(a)
+                elif a["ver_name"] in DISALLOWED_GLIBC_VERSIONS or a["ver_name"].startswith("GLIBC_"):
                     removed_any_aux = True
+                else:
+                    kept_aux.append(a)
             if kept_aux:
                 kept_groups.append({**grp, "aux": kept_aux})
             else:
                 removed_any_aux = True
+
+        if removed_any_aux and not kept_groups:
+            raise RuntimeError(f"{elf_path.name}: Verneed became empty after filtering")
 
         if removed_any_aux and kept_groups:
             new_blob = bytearray()
