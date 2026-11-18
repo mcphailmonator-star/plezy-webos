@@ -98,9 +98,9 @@ class DevicePerformance {
     } catch (_) {}
     _isLowRam = _totalMemBytes != null && _totalMemBytes! <= (3 << 30);
     _autoReduced = true;
-    // Skia otherwise sizes its GPU cache from the 2880x1620 surface
-    // (~220MB); keep a roomier cap than Android since the surface is larger.
-    SystemChannels.skia.invokeMethod<void>('Skia.setResourceCacheMaxBytes', 96 << 20).ignore();
+    // Keep Skia's GPU resource cache bounded on the 1920x1080 TV surface so
+    // it doesn't compete with the hardware video decoder for unified RAM.
+    SystemChannels.skia.invokeMethod<void>('Skia.setResourceCacheMaxBytes', 64 << 20).ignore();
   }
 
   /// Total device RAM as reported by the platform, or null off-Android /

@@ -18,8 +18,12 @@ class App : public FlutterWindow {
  protected:
   void OnBuildViewProperties(
       flutter::FlutterViewController::ViewProperties& vp) override {
+    // ELinuxWindowWayland::GetPhysicalWindowBounds multiplies 1920x1080 by
+    // scale_factor; 1.0 gives a native 1920x1080 EGL surface (2.25x fewer
+    // pixels than 2880x1620) while PlezyWebosFlutterBinding preserves 1280x720
+    // logical sizing via effectiveDpr = physWidth / 1280.0.
     vp.force_scale_factor = true;
-    vp.scale_factor = 1.5;
+    vp.scale_factor = 1.0;
   }
 };
 

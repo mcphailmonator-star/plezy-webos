@@ -219,6 +219,12 @@ class _OptimizedMediaImageState extends State<OptimizedMediaImage> {
   (int, int, double)? _pendingTargetKey;
   Timer? _debounceTimer;
 
+  // Scroll-time decode deferral (reduced tier): avoid kicking off new disk/network
+  // image decodes for cards flying past during rapid D-pad scrolling.
+  final List<ValueNotifier<bool>> _scrollNotifiers = [];
+  Timer? _scrollSettleTimer;
+  String? _startedImageUrl;
+
   @override
   void didUpdateWidget(OptimizedMediaImage oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -233,6 +239,9 @@ class _OptimizedMediaImageState extends State<OptimizedMediaImage> {
       _committedWidth = null;
       _committedHeight = null;
       _committedDensity = null;
+      _scrollSettleTimer?.cancel();
+      _scrollSettleTimer = null;
+      _startedImageUrl = null;
     }
   }
 
@@ -240,7 +249,73 @@ class _OptimizedMediaImageState extends State<OptimizedMediaImage> {
   void dispose() {
     _debounceTimer?.cancel();
     _debounceTimer = null;
+    _scrollSettleTimer?.cancel();
+    _scrollSettleTimer = null;
+    _clearScrollNotifiers();
     super.dispose();
+  }
+
+  void _clearScrollNotifiers() {
+    for (final notifier in _scrollNotifiers) {
+      notifier.removeListener(_onScrollActivityChanged);
+    }
+    _scrollNotifiers.clear();
+  }
+
+  void _syncScrollNotifiers(List<ScrollPosition> positions) {
+    final targetCount = positions.length;
+    var matches = _scrollNotifiers.length == targetCount;
+    if (matches) {
+      for (var i = 0; i < targetCount; i++) {
+        if (!identical(_scrollNotifiers[i], positions[i].isScrollingNotifier)) {
+          matches = false;
+          break;
+        }
+      }
+    }
+    if (matches) return;
+    _clearScrollNotifiers();
+    for (final pos in positions) {
+      final notifier = pos.isScrollingNotifier;
+      notifier.addListener(_onScrollActivityChanged);
+      _scrollNotifiers.add(notifier);
+    }
+  }
+
+  void _onScrollActivityChanged() {
+    final anyScrolling = _scrollNotifiers.any((n) => n.value);
+    if (anyScrolling) {
+      _scrollSettleTimer?.cancel();
+      _scrollSettleTimer = null;
+      return;
+    }
+    _scrollSettleTimer?.cancel();
+    _scrollSettleTimer = Timer(const Duration(milliseconds: 32), () {
+      _scrollSettleTimer = null;
+      if (mounted && !_scrollNotifiers.any((n) => n.value)) {
+        setState(() {});
+      }
+    });
+  }
+
+  static List<ScrollPosition> _enclosingScrollPositions(BuildContext context) {
+    final positions = <ScrollPosition>[];
+    BuildContext? current = context;
+    while (current != null && positions.length < 3) {
+      final scrollable = Scrollable.maybeOf(current);
+      if (scrollable == null) break;
+      positions.add(scrollable.position);
+      current = scrollable.context;
+    }
+    return positions;
+  }
+
+  static bool _isProviderCachedSync(ImageProvider provider) {
+    Object? syncKey;
+    provider.obtainKey(ImageConfiguration.empty).then<void>((key) {
+      syncKey = key;
+    });
+    return syncKey != null && PaintingBinding.instance.imageCache.containsKey(syncKey!);
   }
 
   /// Whether both width and height are explicitly set to finite positive values,
@@ -512,8 +587,19 @@ class _OptimizedMediaImageState extends State<OptimizedMediaImage> {
       logoToneRemapMixed: widget.logoToneRemapMixed,
     );
 
-    // Reduced tier: swap in directly, no fade machinery at all.
+    // Reduced tier: swap in directly, no fade machinery at all, and defer
+    // uncached decodes while an enclosing shelf/grid is actively scrolling.
     if (DevicePerformance.isReduced) {
+      final scrollPositions = _enclosingScrollPositions(context);
+      _syncScrollNotifiers(scrollPositions);
+      final anyScrolling =
+          scrollPositions.any((p) => p.isScrollingNotifier.value) ||
+          Scrollable.recommendDeferredLoadingForContext(context);
+      if (_startedImageUrl != imageUrl && anyScrolling && !_isProviderCachedSync(resizedProvider)) {
+        return _buildPlaceholder(context, imageUrl);
+      }
+      _startedImageUrl = imageUrl;
+
       return _withArtworkDim(
         widget.artworkDim,
         (tint) => Image(
