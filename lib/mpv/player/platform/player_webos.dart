@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -80,6 +81,10 @@ class PlayerWebos extends PlayerBase {
   int _sourceCounter = 0;
   int? _currentSourceId;
   Rect _lastViewRect = const Rect.fromLTWH(0, 0, 1920, 1080);
+  int _boxFitMode = 0; // 0=contain (letterbox), 1=cover (fill screen), 2=fill (stretch)
+  double _videoZoomScale = 1.0;
+  Size? _videoCodedSize;
+  double _videoPar = 1.0;
 
   MediaSourceInfo? _pendingMediaInfo;
   Map<String, String>? _lastHeaders;
@@ -415,8 +420,9 @@ class PlayerWebos extends PlayerBase {
       if (disposed || texId == null) {
         return null;
       }
-      _textureId = texId;
-      appLogger.i('[WebOS-NDL] Created textureId=$texId for sourceId=$sourceId (isHls=$isHls)');
+      final int activeTexId = texId;
+      _textureId = activeTexId;
+      appLogger.i('[WebOS-NDL] Created textureId=$activeTexId for sourceId=$sourceId (isHls=$isHls)');
 
       final trackEntries = _buildTrackListEntries(externalSubtitles);
 
@@ -439,7 +445,7 @@ class PlayerWebos extends PlayerBase {
         unawaited(_ensureSubtitleLoaded(_selectedSubTrackId!));
       }
 
-      _videoEventSub = _webosPlatform.videoEventsFor(texId).listen(
+      _videoEventSub = _webosPlatform.videoEventsFor(activeTexId).listen(
         (VideoEvent event) {
           if (disposed || _currentSourceId != sourceId) return;
           switch (event.eventType) {
@@ -448,6 +454,10 @@ class PlayerWebos extends PlayerBase {
               final durSec = (event.duration?.inMilliseconds ?? 0) / 1000.0;
               if (durSec > 0) {
                 handlePropertyChange('duration', durSec, sourceId: sourceId);
+              }
+              if (event.size != null && event.size!.width > 0 && event.size!.height > 0) {
+                _videoCodedSize = event.size;
+                _videoPar = _webosPlatform.pixelAspectRatioFor(activeTexId) ?? 1.0;
               }
               setSeekable(!isLive);
 
@@ -463,7 +473,7 @@ class PlayerWebos extends PlayerBase {
               handlePropertyChange('track-list', trackEntries, sourceId: sourceId);
               if (_initialAudioOrderIdx != null && _initialAudioOrderIdx! > 0) {
                 unawaited(_auxWebosChannel.invokeMethod<void>('selectTrack', {
-                  'textureId': texId,
+                  'textureId': activeTexId,
                   'type': 'audio',
                   'index': _initialAudioOrderIdx,
                 }));
@@ -507,6 +517,18 @@ class PlayerWebos extends PlayerBase {
               break;
 
             case VideoEventType.unknown:
+              if (event.size != null && event.size!.width > 0 && event.size!.height > 0) {
+                _videoCodedSize = event.size;
+                _videoPar = _webosPlatform.pixelAspectRatioFor(activeTexId) ?? 1.0;
+                unawaited(
+                  updateVideoViewRect(
+                    _lastViewRect.left,
+                    _lastViewRect.top,
+                    _lastViewRect.width,
+                    _lastViewRect.height,
+                  ),
+                );
+              }
               break;
           }
         },
@@ -744,20 +766,132 @@ class PlayerWebos extends PlayerBase {
     }
   }
 
+  double _effectiveDisplayAspect(double sw, double sh) {
+    final codedAspect = sw / sh;
+    final nativeDar = codedAspect * _videoPar;
+    if ((_videoPar - 1.0).abs() <= 0.02) {
+      final mediaDar = _pendingMediaInfo?.videoAspectRatio;
+      if (mediaDar != null && mediaDar.isFinite && mediaDar > 0.2 && mediaDar < 5.0) {
+        if (((mediaDar - nativeDar).abs() / nativeDar) > 0.05) {
+          return mediaDar;
+        }
+      }
+    }
+    return nativeDar > 0 ? nativeDar : codedAspect;
+  }
+
   Future<void> updateVideoViewRect(double x, double y, double w, double h) async {
     if (w > 0 && h > 0) {
       _lastViewRect = Rect.fromLTWH(x, y, w, h);
     }
     final texId = _textureId;
     if (disposed || texId == null || audioOnly) return;
-    if (_lastViewRect.width <= 0 || _lastViewRect.height <= 0) return;
+    if (_lastViewRect.width < 2 || _lastViewRect.height < 2) return;
+
+    final codedSize = _webosPlatform.sourceSizeFor(texId) ?? _videoCodedSize;
+    if (codedSize == null || codedSize.width < 2 || codedSize.height < 2) {
+      return;
+    }
+    final platformPar = _webosPlatform.pixelAspectRatioFor(texId);
+    if (platformPar != null && platformPar > 0) {
+      _videoPar = platformPar;
+    }
+    _videoCodedSize = codedSize;
+
+    final double sw = codedSize.width;
+    final double sh = codedSize.height;
+    final int swInt = sw.round();
+    final int shInt = sh.round();
+    if (swInt < 2 || shInt < 2) return;
+
+    final double vx = math.max(0.0, _lastViewRect.left);
+    final double vy = math.max(0.0, _lastViewRect.top);
+    final double vw = _lastViewRect.width;
+    final double vh = _lastViewRect.height;
+    final double viewAspect = vw / vh;
+    final double dar = _effectiveDisplayAspect(sw, sh);
+
+    double baseSrcX = 0.0;
+    double baseSrcY = 0.0;
+    double baseSrcW = sw;
+    double baseSrcH = sh;
+    double fitX = vx;
+    double fitY = vy;
+    double fitW = vw;
+    double fitH = vh;
+
+    switch (_boxFitMode) {
+      case 1: // cover (Fill screen — crop source to match viewport DAR)
+        if (dar > viewAspect) {
+          baseSrcW = sw * (viewAspect / dar);
+          baseSrcX = (sw - baseSrcW) / 2.0;
+        } else if (dar < viewAspect) {
+          baseSrcH = sh * (dar / viewAspect);
+          baseSrcY = (sh - baseSrcH) / 2.0;
+        }
+        break;
+      case 2: // fill (Stretch — full source into full viewport)
+        break;
+      case 0: // contain (Letterbox / Original DAR)
+      default:
+        if (dar > viewAspect) {
+          fitW = vw;
+          fitH = vw / dar;
+        } else {
+          fitH = vh;
+          fitW = vh * dar;
+        }
+        fitX = vx + (vw - fitW) / 2.0;
+        fitY = vy + (vh - fitH) / 2.0;
+        break;
+    }
+
+    final double zoom = _videoZoomScale.clamp(0.5, 2.0);
+    final double cx = fitX + fitW / 2.0;
+    final double cy = fitY + fitH / 2.0;
+    final double vW = fitW * zoom;
+    final double vH = fitH * zoom;
+    final double vLeft = cx - vW / 2.0;
+    final double vTop = cy - vH / 2.0;
+
+    final double dstLeft = math.max(vx, vLeft);
+    final double dstTop = math.max(vy, vTop);
+    final double dstRight = math.min(vx + vw, vLeft + vW);
+    final double dstBottom = math.min(vy + vh, vTop + vH);
+
+    final double u0 = vW > 0 ? ((dstLeft - vLeft) / vW).clamp(0.0, 1.0) : 0.0;
+    final double u1 = vW > 0 ? ((dstRight - vLeft) / vW).clamp(0.0, 1.0) : 1.0;
+    final double v0 = vH > 0 ? ((dstTop - vTop) / vH).clamp(0.0, 1.0) : 0.0;
+    final double v1 = vH > 0 ? ((dstBottom - vTop) / vH).clamp(0.0, 1.0) : 1.0;
+
+    final double srcX = baseSrcX + u0 * baseSrcW;
+    final double srcY = baseSrcY + v0 * baseSrcH;
+    final double srcW = (u1 - u0) * baseSrcW;
+    final double srcH = (v1 - v0) * baseSrcH;
+
+    final int sx = srcX.round().clamp(0, swInt - 2);
+    final int sy = srcY.round().clamp(0, shInt - 2);
+    final int swOut = srcW.round().clamp(2, swInt - sx);
+    final int shOut = srcH.round().clamp(2, shInt - sy);
+
+    final int dx = dstLeft.round().clamp(0, math.max(0, (vx + vw).floor() - 2));
+    final int dy = dstTop.round().clamp(0, math.max(0, (vy + vh).floor() - 2));
+    final int maxDw = math.max(2, (vx + vw).round() - dx);
+    final int maxDh = math.max(2, (vy + vh).round() - dy);
+    final int dwOut = (dstRight - dstLeft).round().clamp(2, maxDw);
+    final int dhOut = (dstBottom - dstTop).round().clamp(2, maxDh);
+
     try {
-      await _webosPlatform.viewRect(
+      await _webosPlatform.viewRectWithSrc(
         texId,
-        _lastViewRect.left,
-        _lastViewRect.top,
-        _lastViewRect.width,
-        _lastViewRect.height,
+        sx,
+        sy,
+        swOut,
+        shOut,
+        dx,
+        dy,
+        dwOut,
+        dhOut,
       );
     } catch (_) {}
   }
@@ -769,6 +903,8 @@ class PlayerWebos extends PlayerBase {
     _mkvExtractor = null;
     _loadedExternalSubtitles.clear();
     activeSubtitleCues.value = const [];
+    _videoCodedSize = null;
+    _videoPar = 1.0;
     await _videoEventSub?.cancel();
     _videoEventSub = null;
     final texId = _textureId;
@@ -826,6 +962,8 @@ class PlayerWebos extends PlayerBase {
       _videoEventSub = null;
       final oldTex = _textureId;
       _textureId = null;
+      _videoCodedSize = null;
+      _videoPar = 1.0;
       if (oldTex != null) {
         try {
           await _webosPlatform.dispose(oldTex);
@@ -861,6 +999,10 @@ class PlayerWebos extends PlayerBase {
           switch (event.eventType) {
             case VideoEventType.initialized:
               _videoReadyForSubtitles = true;
+              if (event.size != null && event.size!.width > 0 && event.size!.height > 0) {
+                _videoCodedSize = event.size;
+                _videoPar = _webosPlatform.pixelAspectRatioFor(newTexId) ?? 1.0;
+              }
               setSeekable(true);
               unawaited(
                 updateVideoViewRect(
@@ -903,6 +1045,18 @@ class PlayerWebos extends PlayerBase {
               handlePlayerEvent('end-file', {'reason': 'eof', 'sourceId': sourceId});
               break;
             case VideoEventType.unknown:
+              if (event.size != null && event.size!.width > 0 && event.size!.height > 0) {
+                _videoCodedSize = event.size;
+                _videoPar = _webosPlatform.pixelAspectRatioFor(newTexId) ?? 1.0;
+                unawaited(
+                  updateVideoViewRect(
+                    _lastViewRect.left,
+                    _lastViewRect.top,
+                    _lastViewRect.width,
+                    _lastViewRect.height,
+                  ),
+                );
+              }
               break;
           }
         },
@@ -1074,6 +1228,32 @@ class PlayerWebos extends PlayerBase {
   }
 
   @override
+  Future<void> setBoxFitMode(int mode) async {
+    final next = mode.clamp(0, 2);
+    if (_boxFitMode == next) return;
+    _boxFitMode = next;
+    await updateVideoViewRect(
+      _lastViewRect.left,
+      _lastViewRect.top,
+      _lastViewRect.width,
+      _lastViewRect.height,
+    );
+  }
+
+  @override
+  Future<void> setVideoZoom(double scale) async {
+    final next = scale.clamp(0.5, 2.0).toDouble();
+    if ((_videoZoomScale - next).abs() < 0.0001) return;
+    _videoZoomScale = next;
+    await updateVideoViewRect(
+      _lastViewRect.left,
+      _lastViewRect.top,
+      _lastViewRect.width,
+      _lastViewRect.height,
+    );
+  }
+
+  @override
   Future<String?> getProperty(String name) async {
     if (disposed) return null;
     switch (name) {
@@ -1089,6 +1269,16 @@ class PlayerWebos extends PlayerBase {
         return (state.duration.inMilliseconds / 1000.0).toString();
       case 'seekable':
         return state.seekable ? 'yes' : 'no';
+      case 'width':
+        return _videoCodedSize?.width.round().toString();
+      case 'height':
+        return _videoCodedSize?.height.round().toString();
+      case 'dwidth':
+        final coded = _videoCodedSize;
+        if (coded == null || coded.width <= 0 || coded.height <= 0) return null;
+        return (coded.height * _effectiveDisplayAspect(coded.width, coded.height)).round().toString();
+      case 'dheight':
+        return _videoCodedSize?.height.round().toString();
       case 'hwdec-current':
         return 'webos-ndl-hw';
       default:

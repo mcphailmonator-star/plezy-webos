@@ -39,6 +39,7 @@ class TrackControlsState {
   final bool isAlwaysOnTop;
   final VoidCallback? onTogglePIPMode;
   final VoidCallback? onCycleBoxFitMode;
+  final ValueChanged<int>? onBoxFitModeChanged;
   final ValueChanged<double>? onVideoZoomChanged;
   final VoidCallback? onResetVideoZoom;
   final VoidCallback? onToggleRotationLock;
@@ -107,6 +108,7 @@ class TrackControlsState {
     this.isAlwaysOnTop = false,
     this.onTogglePIPMode,
     this.onCycleBoxFitMode,
+    this.onBoxFitModeChanged,
     this.onVideoZoomChanged,
     this.onResetVideoZoom,
     this.onToggleRotationLock,

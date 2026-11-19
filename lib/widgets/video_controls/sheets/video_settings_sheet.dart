@@ -53,6 +53,7 @@ import 'version_quality_sheet.dart';
 enum _SettingsView {
   menu,
   speed,
+  aspectRatio,
   zoom,
   versionQuality,
   sleep,
@@ -364,6 +365,7 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
   _SettingsView _currentView = _SettingsView.menu;
   late int _audioSyncOffset;
   late int _subtitleSyncOffset;
+  late int _boxFitMode;
   late double _zoomScale;
   String _dvConversionMode = 'auto';
   int _dvConversionWriteGeneration = 0;
@@ -406,6 +408,7 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
     super.initState();
     _audioSyncOffset = _state.audioSyncOffset;
     _subtitleSyncOffset = _state.subtitleSyncOffset;
+    _boxFitMode = _state.boxFitMode.clamp(0, 2);
     _zoomScale = VideoFilterManager.normalizeZoomScale(_state.videoZoomScale);
     _hdrToneMapping = SettingsService.instance.read(SettingsService.hdrToneMapping);
     _audioChannelLimit = SettingsService.instance.read(SettingsService.audioChannelLimit);
@@ -427,6 +430,10 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
   @override
   void didUpdateWidget(covariant VideoSettingsSheet oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final nextBoxFitMode = _state.boxFitMode.clamp(0, 2);
+    if (_boxFitMode != nextBoxFitMode) {
+      _boxFitMode = nextBoxFitMode;
+    }
     final nextZoomScale = VideoFilterManager.normalizeZoomScale(_state.videoZoomScale);
     if (_zoomScale != nextZoomScale) {
       _zoomScale = nextZoomScale;
@@ -661,6 +668,8 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
         return t.videoControls.settingsButton;
       case _SettingsView.speed:
         return t.videoSettings.playbackSpeed;
+      case _SettingsView.aspectRatio:
+        return t.videoControls.aspectRatioButton;
       case _SettingsView.zoom:
         return t.videoSettings.zoom;
       case _SettingsView.versionQuality:
@@ -686,6 +695,8 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
         return Symbols.tune_rounded;
       case _SettingsView.speed:
         return Symbols.speed_rounded;
+      case _SettingsView.aspectRatio:
+        return Symbols.fit_screen_rounded;
       case _SettingsView.zoom:
         return Symbols.zoom_in_rounded;
       case _SettingsView.versionQuality:
@@ -734,6 +745,22 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
     if (remaining == null) return t.common.off;
     return t.videoSettings.sleepTimerActive(duration: formatDurationWithSeconds(remaining));
   }
+
+  String _formatBoxFitMode(int mode) => switch (mode) {
+    1 => t.videoControls.fillScreen,
+    2 => t.videoControls.stretch,
+    _ => t.videoControls.letterbox,
+  };
+
+  void _setBoxFitMode(int mode) {
+    final next = mode.clamp(0, 2);
+    setState(() {
+      _boxFitMode = next;
+    });
+    _state.onBoxFitModeChanged?.call(next);
+  }
+
+  void _resetBoxFitMode() => _setBoxFitMode(0);
 
   String _formatZoomScale(double scale) => '${(scale * 100).round()}%';
 
@@ -831,6 +858,15 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
                 onTap: () => _navigateTo(_SettingsView.speed),
               );
             },
+          ),
+
+        if (_state.onBoxFitModeChanged != null)
+          _SettingsMenuItem(
+            icon: Symbols.fit_screen_rounded,
+            title: t.videoControls.aspectRatioButton,
+            valueText: _formatBoxFitMode(_boxFitMode),
+            isHighlighted: _boxFitMode != 0,
+            onTap: () => _navigateTo(_SettingsView.aspectRatio),
           ),
 
         if (_state.onVideoZoomChanged != null || _state.onResetVideoZoom != null)
@@ -1195,6 +1231,32 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
     );
   }
 
+  Widget _buildAspectRatioView() {
+    final modes = <(int mode, String title)>[
+      (0, t.videoControls.letterbox),
+      (1, t.videoControls.fillScreen),
+      (2, t.videoControls.stretch),
+    ];
+    final primary = Theme.of(context).colorScheme.primary;
+
+    return ListView(
+      shrinkWrap: true,
+      children: [
+        FocusableListTile(
+          leading: AppIcon(Symbols.restart_alt_rounded, fill: 1, color: tokens(context).textMuted),
+          title: Text(t.common.reset),
+          onTap: _resetBoxFitMode,
+        ),
+        for (final entry in modes)
+          FocusableListTile(
+            title: Text(entry.$2, style: TextStyle(color: _boxFitMode == entry.$1 ? primary : null)),
+            trailing: _boxFitMode == entry.$1 ? AppIcon(Symbols.check_rounded, fill: 1, color: primary) : null,
+            onTap: () => _setBoxFitMode(entry.$1),
+          ),
+      ],
+    );
+  }
+
   Widget _buildZoomView() {
     const zoomPresets = [0.5, 0.75, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0];
     final primary = Theme.of(context).colorScheme.primary;
@@ -1525,9 +1587,15 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
     final sleepTimer = SleepTimerService();
     final isShaderActive = _state.shaderService != null && _state.shaderService!.currentPreset.isEnabled;
     final isZoomActive = (_zoomScale - 1.0).abs() > 0.0001;
+    final isBoxFitActive = _boxFitMode != 0;
     final isIconActive =
         _currentView == _SettingsView.menu &&
-        (sleepTimer.isActive || _audioSyncOffset != 0 || _subtitleSyncOffset != 0 || isShaderActive || isZoomActive);
+        (sleepTimer.isActive ||
+            _audioSyncOffset != 0 ||
+            _subtitleSyncOffset != 0 ||
+            isShaderActive ||
+            isZoomActive ||
+            isBoxFitActive);
 
     return BaseVideoControlSheet(
       title: _getTitle(),
@@ -1544,6 +1612,8 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
             return _buildMenuView();
           case _SettingsView.speed:
             return _buildSpeedView();
+          case _SettingsView.aspectRatio:
+            return _buildAspectRatioView();
           case _SettingsView.zoom:
             return _buildZoomView();
           case _SettingsView.versionQuality:

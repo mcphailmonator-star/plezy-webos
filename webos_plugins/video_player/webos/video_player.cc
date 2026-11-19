@@ -155,6 +155,10 @@ int64_t VideoPlayer::GetPosition() {
 void VideoPlayer::Dispose(const DisposedCallback disposed_cb) {
   disposed_cb_ = disposed_cb;
   is_initialized_ = false;
+  last_video_width_ = 0;
+  last_video_height_ = 0;
+  last_par_width_ = 1;
+  last_par_height_ = 1;
   event_sink_ = nullptr;
   event_channel_->SetStreamHandler(nullptr);
 
@@ -279,14 +283,24 @@ void VideoPlayer::OnInitialized() {
   int64_t duration = player_.getDuration();
   int width = player_.getVideoWidth();
   int height = player_.getVideoHeight();
+  int parW = player_.getVideoParWidth();
+  int parH = player_.getVideoParHeight();
   if (width <= 0) width = 1920;
   if (height <= 0) height = 1080;
+  if (parW <= 0) parW = 1;
+  if (parH <= 0) parH = 1;
+
   if (!is_initialized_) {
     is_initialized_ = true;
+    last_video_width_ = width;
+    last_video_height_ = height;
+    last_par_width_ = parW;
+    last_par_height_ = parH;
     LogInfo(TAG) << "OnInitialized(" << texture_id_
         << ",duration:" << duration
         << ",video width:" << width
-        << ",height:" << height << ")";
+        << ",height:" << height
+        << ",par:" << parW << ":" << parH << ")";
 
     flutter::EncodableMap result = {
         {flutter::EncodableValue("event"),
@@ -294,7 +308,30 @@ void VideoPlayer::OnInitialized() {
         {flutter::EncodableValue("duration"),
          flutter::EncodableValue(duration)},
         {flutter::EncodableValue("width"), flutter::EncodableValue(width)},
-        {flutter::EncodableValue("height"), flutter::EncodableValue(height)}};
+        {flutter::EncodableValue("height"), flutter::EncodableValue(height)},
+        {flutter::EncodableValue("parWidth"), flutter::EncodableValue(parW)},
+        {flutter::EncodableValue("parHeight"), flutter::EncodableValue(parH)}};
+    PushEvent(flutter::EncodableValue(result));
+  } else if (width != last_video_width_ ||
+             height != last_video_height_ ||
+             parW != last_par_width_ ||
+             parH != last_par_height_) {
+    last_video_width_ = width;
+    last_video_height_ = height;
+    last_par_width_ = parW;
+    last_par_height_ = parH;
+    LogInfo(TAG) << "OnVideoSizeChanged(" << texture_id_
+        << ",video width:" << width
+        << ",height:" << height
+        << ",par:" << parW << ":" << parH << ")";
+
+    flutter::EncodableMap result = {
+        {flutter::EncodableValue("event"),
+         flutter::EncodableValue("videoSizeChanged")},
+        {flutter::EncodableValue("width"), flutter::EncodableValue(width)},
+        {flutter::EncodableValue("height"), flutter::EncodableValue(height)},
+        {flutter::EncodableValue("parWidth"), flutter::EncodableValue(parW)},
+        {flutter::EncodableValue("parHeight"), flutter::EncodableValue(parH)}};
     PushEvent(flutter::EncodableValue(result));
   }
 }

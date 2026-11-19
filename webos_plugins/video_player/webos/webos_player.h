@@ -51,6 +51,8 @@ public:
   bool hasAudio() { return has_audio_; }
   int getVideoWidth() { return videoW_; }
   int getVideoHeight() { return videoH_; }
+  int getVideoParWidth() { return parW_; }
+  int getVideoParHeight() { return parH_; }
   std::string stateToString(int state);
 
   typedef int (*GMainLoopCallback)(void*);
@@ -128,14 +130,20 @@ private:
     int64_t duration;
     bool has_video;
     bool has_audio;
+  } SourceInfoCb;
+
+  typedef struct {
     int video_width;
     int video_height;
-  } SourceInfoCb;
+    int par_width;
+    int par_height;
+  } VideoInfoCb;
 
   typedef std::variant<BasicCb,
                        BufferRangeCb,
                        ErrorCb,
-                       SourceInfoCb> CallbackVariant;
+                       SourceInfoCb,
+                       VideoInfoCb> CallbackVariant;
 
   // The underlying media API exposes a single callback with no user-data
   // parameter, so we route per-instance events through one static
@@ -180,6 +188,7 @@ private:
   void execBufferRange(int64_t start, int64_t end);
   void execError(int64_t code, const std::string& text);
   void execSourceInfo(const SourceInfoCb& info);
+  void execVideoInfo(const VideoInfoCb& info);
 
   PluginPlayerDelegate* delegate_;
   int slot_;
@@ -195,6 +204,8 @@ private:
   bool has_audio_;
   int videoW_;
   int videoH_;
+  int parW_;
+  int parH_;
   bool buffering_;
   int pending_audio_track_ = -1;
   int64_t buffering_start_;

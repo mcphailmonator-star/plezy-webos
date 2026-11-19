@@ -90,6 +90,10 @@ private:
   WebOSPlayer player_;
 
   bool is_initialized_ = false;
+  int last_video_width_ = 0;
+  int last_video_height_ = 0;
+  int last_par_width_ = 1;
+  int last_par_height_ = 1;
   int64_t seek_position_ = 0;
   std::unique_ptr<flutter::EventChannel<flutter::EncodableValue>>
       event_channel_;

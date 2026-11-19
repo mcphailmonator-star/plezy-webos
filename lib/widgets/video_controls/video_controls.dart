@@ -583,6 +583,7 @@ class PlexVideoControls extends StatefulWidget {
   final double videoZoomScale;
   final VoidCallback? onTogglePIPMode;
   final VoidCallback? onCycleBoxFitMode;
+  final ValueChanged<int>? onBoxFitModeChanged;
   final ValueChanged<double>? onVideoZoomChanged;
   final VoidCallback? onZoomIn;
   final VoidCallback? onZoomOut;
@@ -725,6 +726,7 @@ class PlexVideoControls extends StatefulWidget {
     this.videoZoomScale = 1.0,
     this.onTogglePIPMode,
     this.onCycleBoxFitMode,
+    this.onBoxFitModeChanged,
     this.onVideoZoomChanged,
     this.onZoomIn,
     this.onZoomOut,

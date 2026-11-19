@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 import '../../i18n/strings.g.dart';
@@ -182,13 +183,42 @@ class VisualEffectsController {
     if (await shaderService.reapplyForContent() && _isMounted()) _requestRebuild();
   }
 
+  String _boxFitLabel(int mode) => switch (mode) {
+    1 => t.videoControls.fillScreen,
+    2 => t.videoControls.stretch,
+    _ => t.videoControls.letterbox,
+  };
+
+  IconData _boxFitIcon(int mode) => switch (mode) {
+    1 => Symbols.aspect_ratio_rounded,
+    2 => Symbols.settings_overscan_rounded,
+    _ => Symbols.fit_screen_rounded,
+  };
+
   /// Cycle through BoxFit modes: contain → cover → fill → contain (for button)
   void cycleBoxFitMode() {
+    final filterManager = _filterManager();
+    if (filterManager == null) return;
     // Disable ambient lighting when switching boxfit modes
     // (cover/fill change the video rect, making the baked-in shader incorrect)
     _ambientLighting()?.disable();
-    _filterManager()?.cycleBoxFitMode();
+    filterManager.cycleBoxFitMode();
+    _toast.show(_boxFitIcon(filterManager.boxFitMode), _boxFitLabel(filterManager.boxFitMode));
     _requestRebuild();
+  }
+
+  void setBoxFitMode(int mode, {bool showToast = true}) {
+    final filterManager = _filterManager();
+    if (filterManager == null) return;
+
+    final next = mode.clamp(0, 2);
+    _ambientLighting()?.disable();
+    filterManager.setBoxFitMode(next);
+    unawaited(ScopedPlayerPrefs.write(ScopedPlayerPrefs.boxFitMode, _metadata(), next));
+    if (showToast) {
+      _toast.show(_boxFitIcon(next), _boxFitLabel(next));
+    }
+    if (_isMounted()) _requestRebuild();
   }
 
   void _showZoomToast(double zoomScale) {

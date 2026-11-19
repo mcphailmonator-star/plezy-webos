@@ -143,6 +143,8 @@ WebOSPlayer::WebOSPlayer(PluginPlayerDelegate* delegate, const std::string& wind
     , has_audio_(false)
     , videoW_(0)
     , videoH_(0)
+    , parW_(1)
+    , parH_(1)
     , buffering_(false)
     , buffering_start_(0)
     , buffering_end_(0) {
@@ -262,6 +264,14 @@ bool WebOSPlayer::load(const std::string& appId,
     LogWarn(TAG) <<"currentState is" << stateToString(state_) << ", I will unload pipeline";
     unload(true);
   }
+  duration_ = 0;
+  seekable_ = false;
+  has_video_ = false;
+  has_audio_ = false;
+  videoW_ = 0;
+  videoH_ = 0;
+  parW_ = 1;
+  parH_ = 1;
   if (start_position != 0) {
     LogInfo(TAG) <<"load(sartPosition:" << start_position << ")";
   }
@@ -349,6 +359,8 @@ bool WebOSPlayer::unload(bool reset) {
       has_audio_ = false;
       videoW_ = 0;
       videoH_ = 0;
+      parW_ = 1;
+      parH_ = 1;
     }
     speed_ = 1.0;
     audio_out_ = true;
@@ -525,34 +537,32 @@ void WebOSPlayer::handleEvent(const std::string& event_json) {
       return;
     }
 
-    SourceInfoCb cb = { true, dur, num_video > 0, num_audio > 0, 0, 0 };
+    SourceInfoCb cb = { true, dur, num_video > 0, num_audio > 0 };
     if (src["seekable"].isBoolean()) {
       cb.seekable = src["seekable"].asBool();
     }
-    cb.video_width = videoW_;
-    cb.video_height = videoH_;
     pushCallback(cb);
   } else if (!obj["videoInfo"].isNull()) {
     pbnjson::JValue vi = obj["videoInfo"];
-    int w = 0, h = 0;
+    int w = 0, h = 0, pw = 1, ph = 1;
     if (vi["width"].isNumber()) {
       vi["width"].asNumber(w);
     }
     if (vi["height"].isNumber()) {
       vi["height"].asNumber(h);
     }
-    if (w > 0 && h > 0 && (w != videoW_ || h != videoH_)) {
-      videoW_ = w;
-      videoH_ = h;
-      // Only refresh via SourceInfoCb if real source metadata has already
-      // arrived. videoInfo can land before sourceInfo, in which case the
-      // cached source state is all-zero and pushing it here would fire a
-      // premature OnInitialized(duration:0). The next real sourceInfo
-      // will pick up the new dims through cb.video_width = videoW_.
-      if (duration_ > 0 || has_video_ || has_audio_) {
-        SourceInfoCb cb = { seekable_, duration_, has_video_, has_audio_, w, h };
-        pushCallback(cb);
+    if (vi["pixelAspectRatio"].isObject()) {
+      pbnjson::JValue par = vi["pixelAspectRatio"];
+      int tmpW = 0, tmpH = 0;
+      if (par["width"].isNumber()) par["width"].asNumber(tmpW);
+      if (par["height"].isNumber()) par["height"].asNumber(tmpH);
+      if (tmpW > 0 && tmpH > 0) {
+        pw = tmpW;
+        ph = tmpH;
       }
+    }
+    if (w > 0 && h > 0) {
+      pushCallback(VideoInfoCb{ w, h, pw, ph });
     }
   } else if (!obj["error"].isNull()) {
     pbnjson::JValue err = obj["error"];
@@ -673,11 +683,9 @@ void WebOSPlayer::execSourceInfo(const SourceInfoCb& info) {
   duration_ = info.duration;
   has_video_ = info.has_video;
   has_audio_ = info.has_audio;
-  if (info.video_width > 0)  videoW_ = info.video_width;
-  if (info.video_height > 0) videoH_ = info.video_height;
 
-  LogInfo(TAG) << "WH[" << videoW_ << "," << videoH_ << "],duration: "
-    << duration_/1000 << ",seekable:" << seekable_
+  LogInfo(TAG) << "WH[" << videoW_ << "," << videoH_ << "],PAR[" << parW_ << ":" << parH_
+    << "],duration: " << duration_/1000 << ",seekable:" << seekable_
     << ",hasAudio:" << has_audio_ << ",hasVideo:" << has_video_;
 
   // Defensive double-guard: don't fire OnInitialized until we have real
@@ -691,6 +699,30 @@ void WebOSPlayer::execSourceInfo(const SourceInfoCb& info) {
     videoH_ = 1080;
   }
   delegate_->OnInitialized();
+}
+
+void WebOSPlayer::execVideoInfo(const VideoInfoCb& info) {
+  if (info.video_width <= 0 || info.video_height <= 0) {
+    return;
+  }
+  int pw = info.par_width > 0 ? info.par_width : 1;
+  int ph = info.par_height > 0 ? info.par_height : 1;
+  if (info.video_width == videoW_ &&
+      info.video_height == videoH_ &&
+      pw == parW_ &&
+      ph == parH_) {
+    return;
+  }
+  videoW_ = info.video_width;
+  videoH_ = info.video_height;
+  parW_ = pw;
+  parH_ = ph;
+
+  LogInfo(TAG) << "videoInfo WH[" << videoW_ << "," << videoH_ << "],PAR[" << parW_ << ":" << parH_ << "]";
+
+  if (duration_ > 0 || has_audio_ || has_video_) {
+    delegate_->OnInitialized();
+  }
 }
 
 void WebOSPlayer::pushCallback(CallbackVariant cb) {
@@ -747,6 +779,8 @@ void WebOSPlayer::popCallbacks() {
       execError(error_cb->code, error_cb->text);
     } else if (auto info = std::get_if<SourceInfoCb>(&cb)) {
       execSourceInfo(*info);
+    } else if (auto vinfo = std::get_if<VideoInfoCb>(&cb)) {
+      execVideoInfo(*vinfo);
     }
   }
 }

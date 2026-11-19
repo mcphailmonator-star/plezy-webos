@@ -152,6 +152,8 @@ class VideoPlayerWebOs extends VideoPlayerPlatform {
   Map _windowIds = {}; // <texture_id, window_id>
   Map _widgetStates = {}; // <texture_id, _VideoWidgetState>
   Map _srcSizes = {}; // <texture_id, Size>
+  Map _srcPars = {}; // <texture_id, Size>
+  final Map<String, String> _lastResizeKey = {};
   bool _hidden = false;
 
   /// Registers this class as the default platform instance.
@@ -164,6 +166,8 @@ class VideoPlayerWebOs extends VideoPlayerPlatform {
     _windowIds.clear();
     _widgetStates.clear();
     _srcSizes.clear();
+    _srcPars.clear();
+    _lastResizeKey.clear();
 
     _lifeCycleObserver.initialize(this);
     return _api.initialize();
@@ -182,6 +186,10 @@ class VideoPlayerWebOs extends VideoPlayerPlatform {
       var winId = _windowIds[textureId];
       _windowIds.remove(textureId);
       _srcSizes.remove(textureId);
+      _srcPars.remove(textureId);
+      if (winId is String) {
+        _lastResizeKey.remove(winId);
+      }
 
       // Keep exported window alive for reuse so NDL_media TVDisplay never points to a destroyed windowId
       print('video_player_webos($textureId) $winId disposed');
@@ -233,6 +241,10 @@ class VideoPlayerWebOs extends VideoPlayerPlatform {
     // exported window create
     _windowIds[texId] = windowId;
     _srcSizes[texId] = Size(0, 0);
+    _srcPars[texId] = Size(1, 1);
+    if (windowId != null) {
+      _lastResizeKey.remove(windowId);
+    }
     print('video_player_webos($texId) $windowId created');
 
     if (_hidden) {
@@ -312,14 +324,31 @@ class VideoPlayerWebOs extends VideoPlayerPlatform {
         case 'initialized':
           Size size = Size((map['width'] as num?)?.toDouble() ?? 0.0,
               (map['height'] as num?)?.toDouble() ?? 0.0);
+          final parW = (map['parWidth'] as num?)?.toDouble() ?? 1.0;
+          final parH = (map['parHeight'] as num?)?.toDouble() ?? 1.0;
           // exported window set Size
           _srcSizes[textureId] = size;
+          _srcPars[textureId] = Size(parW > 0 ? parW : 1.0, parH > 0 ? parH : 1.0);
           _widgetStates[textureId]?.reExport();
           return VideoEvent(
             eventType: VideoEventType.initialized,
             duration: Duration(milliseconds: map['duration'] as int),
             size: size,
             rotationCorrection: map['rotationCorrection'] as int? ?? 0,
+          );
+        case 'videoSizeChanged':
+          Size size = Size((map['width'] as num?)?.toDouble() ?? 0.0,
+              (map['height'] as num?)?.toDouble() ?? 0.0);
+          final parW = (map['parWidth'] as num?)?.toDouble() ?? 1.0;
+          final parH = (map['parHeight'] as num?)?.toDouble() ?? 1.0;
+          if (size.width > 0 && size.height > 0) {
+            _srcSizes[textureId] = size;
+            _srcPars[textureId] = Size(parW > 0 ? parW : 1.0, parH > 0 ? parH : 1.0);
+            _widgetStates[textureId]?.reExport();
+          }
+          return VideoEvent(
+            eventType: VideoEventType.unknown,
+            size: size,
           );
         case 'completed':
           return VideoEvent(
@@ -404,6 +433,9 @@ class VideoPlayerWebOs extends VideoPlayerPlatform {
           }
           String? windowId = _sharedWindowId;
           _windowIds[texId] = windowId ?? 'invalid';
+          if (windowId != null) {
+            _lastResizeKey.remove(windowId);
+          }
           print(
               'video_player_webos($texId) $windowId created by onHidden to onResumed');
 
@@ -448,8 +480,55 @@ class VideoPlayerWebOs extends VideoPlayerPlatform {
     _widgetStates[texId] = state;
   }
 
+  Size? sourceSizeFor(int texId) {
+    final size = _srcSizes[texId] as Size?;
+    if (size == null || size.width <= 0 || size.height <= 0) {
+      return null;
+    }
+    return size;
+  }
+
+  double? pixelAspectRatioFor(int texId) {
+    final par = _srcPars[texId] as Size?;
+    if (par == null || par.width <= 0 || par.height <= 0) {
+      return null;
+    }
+    return par.width / par.height;
+  }
+
+  Future<void> viewRectWithSrc(
+    int texId,
+    int sx,
+    int sy,
+    int sw,
+    int sh,
+    int dx,
+    int dy,
+    int dw,
+    int dh,
+  ) {
+    final winId = _windowIds[texId] ?? 'invalid';
+    if (winId == 'invalid' || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
+      return Future<void>.value();
+    }
+    final key = '$sx,$sy,$sw,$sh->$dx,$dy,$dw,$dh';
+    if (winId is String && _lastResizeKey[winId] == key) {
+      return Future<void>.value();
+    }
+    if (winId is String) {
+      _lastResizeKey[winId] = key;
+    }
+    print(
+        'video_player_webos($texId) $winId resize([$sx, $sy, $sw, $sh] -> [$dx, $dy, $dw, $dh])');
+
+    return _windowChannel.invokeMethod<void>('resize', {
+      'windowId': winId,
+      'srcRect': [sx, sy, sw, sh],
+      'dstRect': [dx, dy, dw, dh],
+    });
+  }
+
   Future<void> viewRect(int texId, double x, double y, double w, double h) {
-    var winId = _windowIds[texId] ?? 'invalid';
     var size = _srcSizes[texId] ?? Size(0, 0);
     var sw = size.width.round();
     var sh = size.height.round();
@@ -457,14 +536,7 @@ class VideoPlayerWebOs extends VideoPlayerPlatform {
     var dy = y.round();
     var dw = w.round();
     var dh = h.round();
-    print(
-        'video_player_webos($texId) $winId resize([$sw, $sh] -> [$dx, $dy, $dw, $dh])');
-
-    return _windowChannel.invokeMethod<void>('resize', {
-      'windowId': winId,
-      'srcRect': [0, 0, sw, sh],
-      'dstRect': [dx, dy, dw, dh],
-    });
+    return viewRectWithSrc(texId, 0, 0, sw, sh, dx, dy, dw, dh);
   }
 
   bool isReady(int texId) {
