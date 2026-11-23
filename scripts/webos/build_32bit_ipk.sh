@@ -2001,6 +2001,112 @@ EXPORT void *wl_display_connect(const char *name) {
 }
 
 /* ============================================================================
+ * Wayland Seat / Pointer Diagnostics Interceptor
+ * ============================================================================ */
+struct compat_wl_seat_listener_t {
+    void (*capabilities)(void *data, void *seat, uint32_t caps);
+    void (*name)(void *data, void *seat, const char *name);
+};
+
+struct compat_seat_slot {
+    void *seat;
+    void (*orig_caps)(void *data, void *seat, uint32_t caps);
+    void (*orig_name)(void *data, void *seat, const char *name);
+};
+
+#define COMPAT_MAX_SEATS 8
+static struct compat_seat_slot g_compat_seats[COMPAT_MAX_SEATS];
+static uint32_t g_seat_event_logs = 0;
+static uint32_t g_ptr_listener_logs = 0;
+
+static void compat_wl_seat_capabilities(void *data, void *seat, uint32_t caps) {
+    if (__atomic_fetch_add(&g_seat_event_logs, 1U, __ATOMIC_RELAXED) < 24U) {
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "wl_seat.capabilities seat=");
+        lbuf_hex32(&b, (uint32_t)(uintptr_t)seat);
+        lbuf_str(&b, " caps=");
+        lbuf_hex32(&b, caps);
+        if (caps & 1U) lbuf_str(&b, " POINTER");
+        if (caps & 2U) lbuf_str(&b, " KEYBOARD");
+        if (caps & 4U) lbuf_str(&b, " TOUCH");
+        log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+    }
+    for (unsigned int i = 0; i < COMPAT_MAX_SEATS; ++i) {
+        if (g_compat_seats[i].seat == seat && g_compat_seats[i].orig_caps) {
+            g_compat_seats[i].orig_caps(data, seat, caps);
+            return;
+        }
+    }
+}
+
+static void compat_wl_seat_name(void *data, void *seat, const char *name) {
+    if (__atomic_fetch_add(&g_seat_event_logs, 1U, __ATOMIC_RELAXED) < 24U) {
+        struct log_buf b;
+        lbuf_init(&b);
+        lbuf_str(&b, "wl_seat.name seat=");
+        lbuf_hex32(&b, (uint32_t)(uintptr_t)seat);
+        lbuf_str(&b, " name=");
+        lbuf_str_trunc(&b, name ? name : "(null)", 64);
+        log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+    }
+    for (unsigned int i = 0; i < COMPAT_MAX_SEATS; ++i) {
+        if (g_compat_seats[i].seat == seat && g_compat_seats[i].orig_name) {
+            g_compat_seats[i].orig_name(data, seat, name);
+            return;
+        }
+    }
+}
+
+static const struct compat_wl_seat_listener_t g_compat_seat_listener_impl = {
+    compat_wl_seat_capabilities,
+    compat_wl_seat_name,
+};
+
+EXPORT int wl_proxy_add_listener(void *proxy, void (**implementation)(void), void *data) {
+    typedef int (*fn_t)(void *, void (**)(void), void *);
+    typedef const char *(*get_class_fn_t)(void *);
+
+    fn_t real_fn = (fn_t)resolve_wl_sym("wl_proxy_add_listener");
+    if (!real_fn || real_fn == wl_proxy_add_listener) {
+        return -1;
+    }
+
+    get_class_fn_t get_cls = (get_class_fn_t)resolve_wl_sym("wl_proxy_get_class");
+    const char *cls = (proxy && get_cls) ? get_cls(proxy) : 0;
+
+    if (cls && strcmp(cls, "wl_seat") == 0 && implementation) {
+        const struct compat_wl_seat_listener_t *orig =
+            (const struct compat_wl_seat_listener_t *)implementation;
+        int slot_idx = -1;
+        for (int i = 0; i < COMPAT_MAX_SEATS; ++i) {
+            if (g_compat_seats[i].seat == proxy || g_compat_seats[i].seat == 0) {
+                slot_idx = i;
+                break;
+            }
+        }
+        if (slot_idx >= 0) {
+            g_compat_seats[slot_idx].orig_caps = orig->capabilities;
+            g_compat_seats[slot_idx].orig_name = orig->name;
+            __atomic_store_n(&g_compat_seats[slot_idx].seat, proxy, __ATOMIC_RELEASE);
+            return real_fn(proxy, (void (**)(void))&g_compat_seat_listener_impl, data);
+        }
+    } else if (cls && strcmp(cls, "wl_pointer") == 0) {
+        if (__atomic_fetch_add(&g_ptr_listener_logs, 1U, __ATOMIC_RELAXED) < 12U) {
+            struct log_buf b;
+            lbuf_init(&b);
+            lbuf_str(&b, "wl_pointer_add_listener ptr=");
+            lbuf_hex32(&b, (uint32_t)(uintptr_t)proxy);
+            lbuf_str(&b, " data=");
+            lbuf_hex32(&b, (uint32_t)(uintptr_t)data);
+            log_raw_line(PMLOG_LEVEL_INFO, &b, 1);
+        }
+    }
+
+    return real_fn(proxy, implementation, data);
+}
+
+/* ============================================================================
  * Wayland-EGL Dynamic Bridge (libwayland-egl.so.1 -> libwayland-egl.so.0 / Mali)
  * ============================================================================ */
 #define COMPAT_WL_EGL_CAND_COUNT 10
@@ -3624,6 +3730,102 @@ targets = [app_dir / "plezy"] + sorted((app_dir / "lib").glob("*.so*"))
 for t in targets:
     if t.is_file() and not t.is_symlink() and t.name not in ("libwebos_compat32.so", "libapp.so"):
         patch_elf_cleanly(t)
+
+def patch_multiseat_pointer(so_path: Path):
+    if not so_path.exists():
+        return
+    data = bytearray(so_path.read_bytes())
+    e_shoff = struct.unpack_from("<I", data, 0x20)[0]
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", data, 0x2E)
+    shdrs = [
+        struct.unpack_from("<10I", data, e_shoff + idx * e_shentsize)
+        for idx in range(e_shnum)
+    ]
+    shstr_off = shdrs[e_shstrndx][4]
+    def sh_name(idx):
+        off = shstr_off + shdrs[idx][0]
+        return data[off:data.find(b"\x00", off)].decode("ascii", "replace")
+
+    dynsym_sh = next((s for i, s in enumerate(shdrs) if sh_name(i) == ".dynsym"), None)
+    dynstr_sh = next((s for i, s in enumerate(shdrs) if sh_name(i) == ".dynstr"), None)
+    text_sh = next((s for i, s in enumerate(shdrs) if sh_name(i) == ".text"), None)
+    if not dynsym_sh or not dynstr_sh or not text_sh:
+        raise RuntimeError(f"{so_path.name}: fehlende ELF-Sektionen fuer Multi-Seat-Pointer-Patch")
+
+    ds_off = dynstr_sh[4]
+    def dyn_str(off):
+        p = ds_off + off
+        return data[p:data.find(b"\x00", p)].decode("ascii", "replace")
+
+    sym_off, sym_size, sym_entsize = dynsym_sh[4], dynsym_sh[5], dynsym_sh[9]
+    syms = {}
+    for idx in range(sym_size // sym_entsize):
+        st_name, st_value, st_size, _st_info, _st_other, st_shndx = struct.unpack_from(
+            "<IIIBBH", data, sym_off + idx * sym_entsize
+        )
+        if st_shndx != 0 and st_name != 0:
+            name = dyn_str(st_name)
+            if "WaylandSeatInputs" in name:
+                syms[name] = (st_value & ~1, st_size)
+
+    text_vaddr, text_foff, text_size = text_sh[3], text_sh[4], text_sh[5]
+    def v2f(va):
+        return text_foff + (va - text_vaddr)
+
+    changed = False
+
+    add_ptr_sym = "_ZN7flutter17WaylandSeatInputs10AddPointerEP10wl_pointer"
+    if add_ptr_sym in syms:
+        va, sz = syms[add_ptr_sym]
+        f0 = v2f(va)
+        f1 = f0 + min(sz if sz > 0 else 0x48, 0x48)
+        old_bytes = bytes.fromhex("60b18068a84218bfb0bd")
+        new_bytes = bytes.fromhex("65b100bf00bf00bf00bf")
+        pos = data.find(old_bytes, f0, f1)
+        if pos >= 0:
+            data[pos:pos + len(new_bytes)] = new_bytes
+            changed = True
+            print(f"  -> {so_path.name}: WaylandSeatInputs::AddPointer Multi-Seat-Filter entfernt (0x{pos:x}).")
+        elif data.find(new_bytes, f0, f1) >= 0:
+            print(f"  -> {so_path.name}: WaylandSeatInputs::AddPointer war bereits gepatcht.")
+        else:
+            raise RuntimeError(f"{so_path.name}: AddPointer-Signatur nicht gefunden in 0x{f0:x}..0x{f1:x}")
+    else:
+        raise RuntimeError(f"{so_path.name}: Symbol {add_ptr_sym} nicht gefunden")
+
+    ctor_sym = "_ZN7flutter17WaylandSeatInputsC2EPNS_19ELinuxWindowWaylandEPNS_17FlutterELinuxViewE"
+    if ctor_sym in syms:
+        va, sz = syms[ctor_sym]
+        f0 = v2f(va)
+        f1 = f0 + min(sz if sz > 0 else 0xB0, 0xB0)
+        head = bytes.fromhex("206a")
+        tail = bytes.fromhex("48b18068b84206d1")
+        nops = bytes.fromhex("00bf" * 7)
+        patched_ctor = False
+        already_ctor = False
+        for i in range(f0, f1 - 14 + 1, 2):
+            if data[i:i+2] == head and data[i+6:i+14] == tail:
+                i1, i2 = struct.unpack_from("<HH", data, i + 2)
+                if (i1 & 0xF800) == 0xF000 and (i2 & 0xE800) == 0xE800:
+                    data[i:i+14] = nops
+                    changed = True
+                    patched_ctor = True
+                    print(f"  -> {so_path.name}: WaylandSeatInputs ctor Multi-Seat-Filter entfernt (0x{i:x}).")
+                    break
+        if not patched_ctor:
+            # Check idempotency: cbz r7 followed directly by 7 NOPs
+            if data.find(bytes.fromhex("6fb1") + nops, f0, f1) >= 0:
+                already_ctor = True
+                print(f"  -> {so_path.name}: WaylandSeatInputs ctor war bereits gepatcht.")
+            if not already_ctor:
+                raise RuntimeError(f"{so_path.name}: WaylandSeatInputs ctor Signatur nicht gefunden in 0x{f0:x}..0x{f1:x}")
+    else:
+        raise RuntimeError(f"{so_path.name}: Symbol {ctor_sym} nicht gefunden")
+
+    if changed:
+        so_path.write_bytes(data)
+
+patch_multiseat_pointer(app_dir / "lib" / "libflutter_webos_media.so")
 PYEOF
 
 rm -rf "$APP_DIR/appdata/"* "$APP_DIR/appdata/".* 2>/dev/null || true

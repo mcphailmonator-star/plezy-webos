@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
@@ -873,6 +874,17 @@ class TvBrowseRailState extends State<TvBrowseRail> with TickerProviderStateMixi
     return KeyEventResult.ignored;
   }
 
+  void _handlePointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    final dx = event.scrollDelta.dx;
+    final dy = event.scrollDelta.dy;
+    if (dy.abs() >= dx.abs() && dy != 0) {
+      _moveHub(dy > 0 ? 1 : -1);
+    } else if (dx != 0) {
+      _moveItem(dx > 0 ? 1 : -1);
+    }
+  }
+
   void _moveItem(int delta) {
     final hub = _activeHub;
     if (hub == null) return;
@@ -1338,25 +1350,28 @@ class TvBrowseRailState extends State<TvBrowseRail> with TickerProviderStateMixi
                       ),
                       child: ClipRect(
                         clipper: _RailClipper(leftOverflow: horizontalInset, rightOverflow: 0),
-                        child: ExcludeSemantics(
-                          // Both axes animate during D-pad navigation. Keeping
-                          // the individual headers/cards in the semantics tree
-                          // makes Android recompute every moving node's bounds
-                          // on every frame when an accessibility service is
-                          // active. A fixed proxy below exposes the same active
-                          // selection and actions without tracking that motion.
-                          child: SizedBox(
-                            height: viewportHeight,
-                            child: _buildHubSectionList(
-                              modes: modes,
-                              metricsByHub: metricsByHub,
-                              sectionHeights: sectionHeights,
-                              scale: scale,
-                              fullCardLayout: fullCardLayout,
-                              leftOverflow: horizontalInset,
-                              interactionExpansion: interactionExpansion,
-                              railViewportWidth: railViewportWidth,
-                              bottomPadding: bottomPadding,
+                        child: Listener(
+                          onPointerSignal: _handlePointerSignal,
+                          child: ExcludeSemantics(
+                            // Both axes animate during D-pad navigation. Keeping
+                            // the individual headers/cards in the semantics tree
+                            // makes Android recompute every moving node's bounds
+                            // on every frame when an accessibility service is
+                            // active. A fixed proxy below exposes the same active
+                            // selection and actions without tracking that motion.
+                            child: SizedBox(
+                              height: viewportHeight,
+                              child: _buildHubSectionList(
+                                modes: modes,
+                                metricsByHub: metricsByHub,
+                                sectionHeights: sectionHeights,
+                                scale: scale,
+                                fullCardLayout: fullCardLayout,
+                                leftOverflow: horizontalInset,
+                                interactionExpansion: interactionExpansion,
+                                railViewportWidth: railViewportWidth,
+                                bottomPadding: bottomPadding,
+                              ),
                             ),
                           ),
                         ),
