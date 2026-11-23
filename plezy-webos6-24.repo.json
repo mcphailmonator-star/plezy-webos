@@ -10,22 +10,22 @@
       "id": "com.mcphailmonator.plezy",
       "title": "Plezy (webOS 6-24)",
       "shortDescription": "Plex, Jellyfin & Emby client (webOS 6-24 / Re:New build)",
-      "iconUri": "https://raw.githubusercontent.com/mcphailmonator-star/plezy-webos/v2.26.4-webos.1/webos/meta/icon.png",
+      "iconUri": "https://raw.githubusercontent.com/mcphailmonator-star/plezy-webos/v2.26.5-webos.1/webos/meta/icon.png",
       "manifestUrl": "https://raw.githubusercontent.com/mcphailmonator-star/plezy-webos/hb-repo/plezy-webos6-24.manifest.json",
       "manifest": {
         "id": "com.mcphailmonator.plezy",
-        "version": "2.26.4",
+        "version": "2.26.5",
         "type": "native",
         "title": "Plezy (webOS 6-24)",
-        "iconUri": "https://raw.githubusercontent.com/mcphailmonator-star/plezy-webos/v2.26.4-webos.1/webos/meta/icon.png",
+        "iconUri": "https://raw.githubusercontent.com/mcphailmonator-star/plezy-webos/v2.26.5-webos.1/webos/meta/icon.png",
         "sourceUrl": "https://github.com/mcphailmonator-star/plezy-webos",
         "rootRequired": false,
-        "ipkUrl": "https://github.com/mcphailmonator-star/plezy-webos/releases/download/v2.26.4-webos.1/com.mcphailmonator.plezy_2.26.4_arm_webos6-24.ipk",
+        "ipkUrl": "https://github.com/mcphailmonator-star/plezy-webos/releases/download/v2.26.5-webos.1/com.mcphailmonator.plezy_2.26.5_arm_webos6-24.ipk",
         "ipkHash": {
-          "sha256": "eae8c7d8a2ecd8876b5a69961a8c652c9691d02f9c8636fc91eadd0256b06e62"
+          "sha256": "6fabb46128989e2fc5404f05fb46718ae09430e79ee982f136c5598540cc64a0"
         },
-        "ipkSize": 36376276,
-        "installedSize": 93951149,
+        "ipkSize": 36378196,
+        "installedSize": 93951199,
         "appDescription": "Plex, Jellyfin, and Emby client for pre-2025 LG webOS TVs (webOS 6.x through webOS 24, plus Re:New-updated TVs)."
       }
     }
