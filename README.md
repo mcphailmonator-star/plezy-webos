@@ -21,7 +21,12 @@ This build runs natively on webOS using [`flutter-webos`](https://github.com/lg-
 </p>
 
 <p align="center">
-  <img src="assets/readme-showcase.webp" alt="Plezy screenshots" width="900" />
+  <img src="assets/screenshots/tv-home.webp" alt="Plezy TV Home and Continue Watching" width="49%" />
+  <img src="assets/screenshots/tv-library.webp" alt="Plezy TV Library Browse" width="49%" />
+</p>
+<p align="center">
+  <img src="assets/screenshots/tv-detail.webp" alt="Plezy TV Show Detail View" width="49%" />
+  <img src="assets/screenshots/tv-player.webp" alt="Plezy TV Playback OSD" width="49%" />
 </p>
 
 ## Choosing an IPK
