@@ -53,28 +53,28 @@ APP_ID="${APP_ID:-com.mcphailmonator.plezy}"
 
 NOTES_TMP="$(mktemp)"
 cat << NOTES_EOF > "$NOTES_TMP"
-Native 32-bit ARM (\`armv7l\`) packages of Plezy for LG webOS TVs. Both builds share the application ID \`${APP_ID}\`. Only one package or Homebrew repository should be active on a TV at a time.
+32-bit ARM (\`armv7l\`) release of Plezy for LG webOS TVs (app ID \`${APP_ID}\`). Install only one package variant or Homebrew repository on a TV at a time.
 
-### Package Selection (TV Model Year vs. webOS Version)
+### Choosing the Right Package
 
-Which package your TV requires depends primarily on the **hardware release year** of the television rather than the displayed webOS version number alone. When 2022–2024 TVs receive webOS 25 or webOS 26 through LG's *webOS Re:New* program, the system interface is updated, but the underlying C runtime (\`glibc 2.31–2.35\`) and Wayland compositor protocol (\`wl_webos_shell\` v1) remain on the pre-2025 baseline rather than upgrading to the \`glibc 2.38\` and \`wl_webos_shell\` v2 stack used on factory-built 2025/2026 models.
+Select the package that matches your **TV's hardware model year** rather than the webOS version displayed in settings. TVs from 2022–2024 that receive webOS 25 or 26 via LG's *webOS Re:New* program keep their original \`glibc 2.31–2.35\` runtime and \`wl_webos_shell\` v1 compositor protocol, so they still require the \`webos6-24\` build.
 
-* **\`webos25-26\` (Standard Build):** Built for 2025 and 2026 LG TV models that shipped with webOS 25 or webOS 26 from the factory (\`glibc 2.38+\` / \`wl_webos_shell\` v2).
-* **\`webos6-24\` (Compatibility Build):** Bundles \`libwebos_compat32.so\` (\`glibc 2.28–2.38\` symbol & startup bridges, \`wl_webos_shell\` v1 protocol clamp & \`wl_proxy_marshal_flags\` fallback, and \`NDL_Media*\` shims), NDK \`libstdc++.so.6\` (\`6.0.32\`), and \`libsqlite3_dart.so\` (\`3.50.2\` via \`NativeAssetsManifest.json\`). Packed in System V \`ar\` + POSIX \`ustar\` format with accurate \`Installed-Size\`. Statically verified against firmware library dumps from **webOS 6.4.0 (\`glibc 2.28\`, 2021 models) through webOS 11.2.0**. Use this build on **all webOS 6.x–24 TVs** (including 2021 models such as \`75QNED90UPA\` / \`C1\` / \`G1\` and 2022–2024 models updated to webOS 25 or 26 via *Re:New*), or whenever the \`webos25-26\` package closes immediately on launch.
+* **\`webos6-24\` (2021–2024 TVs & Re:New Upgrades):** Targets webOS 6.x through webOS 24 as well as 2022–2024 models updated to webOS 25/26. Bundles \`libwebos_compat32.so\` (\`glibc 2.28–2.38\` symbol shims, \`wl_webos_shell\` v1 protocol handling, and \`NDL_Media*\` wrappers), NDK \`libstdc++.so.6\` (\`6.0.32\`), and \`libsqlite3_dart.so\` (\`3.50.2\`). Use this package if the \`webos25-26\` build exits on startup.
+* **\`webos25-26\` (2025–2026 Factory TVs):** Targets 2025 and 2026 LG models that shipped from the factory with webOS 25 or webOS 26 (\`glibc 2.38+\` and \`wl_webos_shell\` v2).
 
-### Downloads & Homebrew Channel Repositories
+### Packages & Homebrew Repositories
 
-| Target Hardware / Runtime | IPK Package | Homebrew Repository URL (add in Homebrew Settings) |
+| TV Hardware | IPK File | Homebrew Channel / Glasshouse Repository URL |
 | :--- | :--- | :--- |
-| Pre-2025 hardware (webOS 6.x–24 & Re:New-updated TVs) | \`${APP_ID}_*_arm_webos6-24.ipk\` | ${RAW_REPO_BASE}/plezy-webos6-24.repo.json |
-| Factory webOS 25 / 26 hardware (2025+ models) | \`${APP_ID}_*_arm_webos25-26.ipk\` | ${RAW_REPO_BASE}/plezy-webos25-26.repo.json |
+| 2021–2024 TVs (webOS 6.x–24 & *Re:New* 25/26) | \`${APP_ID}_*_arm_webos6-24.ipk\` | ${RAW_REPO_BASE}/plezy-webos6-24.repo.json |
+| 2025–2026 Factory TVs (webOS 25 / 26) | \`${APP_ID}_*_arm_webos25-26.ipk\` | ${RAW_REPO_BASE}/plezy-webos25-26.repo.json |
 
 *(Release asset mirrors: ${LATEST_RELEASE_BASE}/plezy-webos6-24.repo.json and ${LATEST_RELEASE_BASE}/plezy-webos25-26.repo.json)*
 
-### Installation & Automatic Updates
+### Installation
 
-* **webOS Homebrew Channel / Glasshouse:** Open the Homebrew Channel app on your TV, go to **Settings -> Repositories -> Add repository**, and enter **only the \`.repo.json\` URL** matching your TV hardware from the table above (do **not** enter the GitHub repository page URL or a \`.manifest.json\` URL, and do not enable both variants at the same time). The manifest verifies the IPK's SHA-256 checksum before installing.
-* **Manual Installation:** Download the matching \`.ipk\` file from the release assets below and install it via **webOS Dev Manager** or the command line (\`ares-install <package>.ipk\`).
+* **Homebrew Channel / Glasshouse (Auto-Updates):** Open Homebrew Channel on your TV, go to **Settings → Repositories → Add Repository**, and enter the single \`.repo.json\` URL for your TV from the table above (do not use the GitHub repository URL or a \`.manifest.json\` link, and do not add both repositories at once).
+* **Sideloading:** Download the matching \`.ipk\` below and install it with **webOS Dev Manager** or \`ares-install <package>.ipk\`.
 NOTES_EOF
 
 gh release delete "$TAG" --repo "$REPO" --yes 2>/dev/null || true
